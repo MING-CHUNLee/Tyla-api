@@ -1,0 +1,149 @@
+# frozen_string_literal: true
+
+require 'rake/testtask'
+require_relative './require_app'
+
+desc 'Run all tests'
+Rake::TestTask.new(:spec) do |t|
+  t.pattern = 'backend_app/spec/**/*_spec.rb'
+  t.warning = false
+end
+
+desc 'Run all tests'
+task test: :spec
+
+task default: :spec
+
+desc 'Lint Ruby code with RuboCop'
+task :style do
+  sh 'bundle exec rubocop'
+end
+
+desc 'Audit bundled gems for known CVEs'
+task :audit do
+  sh 'bundle exec bundle-audit check --update'
+end
+
+desc 'Full pre-release check: tests + style + audit'
+task quality: %i[spec style audit]
+
+task :print_env do
+  puts "Environment: #{ENV['RACK_ENV'] || 'development'}"
+end
+
+desc 'Open interactive Tyla console (pry) with full app loaded'
+task console: :print_env do
+  sh 'pry -r ./console', verbose: false
+end
+
+desc 'Setup project for first time (install dependencies, configure secrets)'
+task :setup do
+  puts '==> Installing backend dependencies...'
+  sh 'bundle config set --local without production'
+  sh 'bundle install'
+
+  puts "\n==> Installing frontend dependencies..."
+  sh 'npm install'
+
+  # Setup backend secrets
+  secrets_src = 'backend_app/config/secrets_example.yml'
+  secrets_dst = 'backend_app/config/secrets.yml'
+  unless File.exist?(secrets_dst)
+    puts "\n==> Copying #{secrets_src} to #{secrets_dst}..."
+    cp secrets_src, secrets_dst
+  end
+
+  # Setup frontend environment
+  env_src = 'frontend_app/.env.local.example'
+  env_dst = 'frontend_app/.env.local'
+  unless File.exist?(env_dst)
+    puts "\n==> Copying #{env_src} to #{env_dst}..."
+    cp env_src, env_dst
+    puts '    Edit .env.local to set VUE_APP_GOOGLE_CLIENT_ID (see doc/google.md)'
+  end
+
+  puts "\n==> Setup complete! Next steps:"
+  puts '    1. Generate JWT_KEY:  bundle exec rake generate:jwt_key'
+  puts '       Copy the output into backend_app/config/secrets.yml'
+  puts '    2. Set ADMIN_EMAIL in backend_app/config/secrets.yml (your Google email)'
+  puts '    3. Set VUE_APP_GOOGLE_CLIENT_ID in frontend_app/.env.local (see doc/google.md)'
+  puts '    4. Setup databases:'
+  puts '       bundle exec rake db:setup              # Development'
+  puts '       RACK_ENV=test bundle exec rake db:setup # Test'
+end
+
+namespace :db do
+  task :config do
+    require('sequel')
+    require_app('config', with_initializers: false)
+  end
+
+  desc 'Migrate the database to the latest version'
+  task migrate: [:config] do
+    Sequel.extension :migration
+
+    # Set up the migration path
+    migration_path = File.expand_path('backend_app/db/migrations', __dir__)
+
+    # Run the migrations
+    Dir.glob("#{migration_path}/*.rb").each { |file| require file }
+    Sequel::Migrator.run(Tyla::Api.db, migration_path)
+  end
+
+  desc 'Seed the database with default data'
+  task seed: [:config] do
+    seed_path = File.expand_path('backend_app/db/seeds/account_seeds.rb')
+
+    # Load and execute the seed script
+    load(seed_path)
+    puts 'Database has been seeded.'
+  end
+
+  desc 'Delete dev or test database file'
+  task drop: [:config] do
+    @app = Tyla::Api
+    if @app.environment == :production
+      puts 'Cannot wipe production database!'
+      return
+    end
+
+    db_filename = "backend_app/db/store/#{@app.environment}.db"
+    FileUtils.rm(db_filename) if File.exist?(db_filename)
+    puts "Deleted #{db_filename}"
+  end
+
+  desc 'Setup database (migrate and seed)'
+  task setup: %i[migrate seed]
+
+  desc 'Reset database (drop, migrate, seed)'
+  task reset: %i[drop migrate seed]
+end
+
+namespace :run do
+  desc 'Run backend API server for development'
+  task :api do
+    sh 'puma config.ru -t 1:5 -p 9292'
+  end
+
+  desc 'Run frontend webpack dev server'
+  task :frontend do
+    sh 'npm run dev'
+  end
+end
+
+namespace :generate do
+  desc 'Generate JWT_KEY for secrets.yml'
+  task :jwt_key do
+    require_relative 'backend_app/app/infrastructure/auth/auth_token/gateway'
+    puts "JWT_KEY: #{Tyla::AuthToken::Gateway.generate_key}"
+  end
+
+  # Alias for backwards compatibility
+  task msg_key: :jwt_key
+
+  desc 'Generate LOCAL_STORAGE_SIGNING_KEY for secrets.yml (dev/test only)'
+  task :local_storage_signing_key do
+    require_relative 'backend_app/app/lib/security'
+    puts "LOCAL_STORAGE_SIGNING_KEY: #{Tyla::Security.generate_signing_key}"
+  end
+end
