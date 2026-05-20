@@ -5,8 +5,12 @@ require 'sequel'
 require 'json'
 require 'logger'
 
+require_relative '../app/infrastructure/middleware/key_scrubber'
+
 module Tyla
   class Api < Roda
+    use Tyla::Middleware::KeyScrubber
+
     plugin :json
     plugin :json_parser
     plugin :halt
