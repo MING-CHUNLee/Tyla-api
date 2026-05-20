@@ -31,14 +31,12 @@ module Tyla
               response.status = 201
               serialize(log)
             end
-
             # GET /api/v1/prompt_logs?student_id=X&course_id=Y&project_id=Z
             r.get do
               dataset = Database::PromptLogOrm.order(Sequel.desc(:created_at))
               dataset = dataset.where(student_id: r.params['student_id']) if r.params['student_id']
               dataset = dataset.where(course_id:  r.params['course_id'])  if r.params['course_id']
               dataset = dataset.where(project_id: r.params['project_id']) if r.params['project_id']
-
               dataset.map { |log| serialize(log) }
             end
           end
