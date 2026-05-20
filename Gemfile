@@ -2,7 +2,7 @@
 
 source 'https://rubygems.org'
 
-ruby '3.3.10'
+ruby '>= 3.3.10'
 
 # Web framework & server
 gem 'puma',           '~> 6.0'
