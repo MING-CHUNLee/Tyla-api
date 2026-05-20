@@ -5,7 +5,7 @@ require_relative './require_app'
 
 desc 'Run all tests'
 Rake::TestTask.new(:spec) do |t|
-  t.pattern = 'backend_app/spec/**/*_spec.rb'
+  t.pattern = 'spec/**/*_spec.rb'
   t.warning = false
 end
 

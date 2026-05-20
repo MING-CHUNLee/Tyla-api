@@ -1,6 +1,8 @@
 GEM
   remote: https://rubygems.org/
   specs:
+    addressable (2.9.0)
+      public_suffix (>= 2.0.2, < 8.0)
     ast (2.4.2)
     aws-eventstream (1.4.0)
     aws-partitions (1.1247.0)
@@ -28,6 +30,9 @@ GEM
       thor (~> 1.0)
     coderay (1.1.3)
     concurrent-ruby (1.3.4)
+    crack (1.0.1)
+      bigdecimal
+      rexml
     csv (3.3.5)
     declarative (0.0.20)
     docile (1.4.1)
@@ -95,6 +100,7 @@ GEM
     google-id-token (1.4.2)
       jwt (>= 1)
     hana (1.3.7)
+    hashdiff (1.2.1)
     ice_nine (0.11.2)
     jmespath (1.6.2)
     json (2.7.5)
@@ -125,6 +131,7 @@ GEM
     pry (0.14.2)
       coderay (~> 1.1)
       method_source (~> 1.0)
+    public_suffix (7.0.5)
     puma (6.4.3)
       nio4r (~> 2.0)
     racc (1.8.1)
@@ -181,6 +188,10 @@ GEM
     trailblazer-option (0.1.2)
     uber (0.1.0)
     unicode-display_width (2.6.0)
+    webmock (3.26.2)
+      addressable (>= 2.8.0)
+      crack (>= 0.3.2)
+      hashdiff (>= 0.4.0, < 2.0.0)
     zeitwerk (2.7.1)
 
 PLATFORMS
@@ -234,6 +245,7 @@ DEPENDENCIES
   sqlite3 (>= 1.0)
   table_print (~> 1.0)
   tilt
+  webmock (~> 3.0)
 
 RUBY VERSION
    ruby 3.3.10p183
