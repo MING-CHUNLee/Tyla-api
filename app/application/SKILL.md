@@ -24,14 +24,20 @@ delegate work to Service Objects, and return the result to Presentation.
 ## Layered Architecture (this project)
 
 ```
-src/
-├── presentation/          ← Show results, capture input (TUI, view-models, views)
-├── application/           ← YOU ARE HERE: orchestrate requests
-│   ├── controllers/       ← Thin entry points per CLI command
-│   ├── services/          ← Business logic steps (see ./services/SKILL.md)
-│   ├── prompts/           ← LLM prompt builders
-├── domain/                ← Decision-making objects (entities, values, interfaces)
-└── infrastructure/        ← CRUD for outside resources (API, filesystem, persistence)
+app/
+├── presentation/                ← Serialize domain to wire formats (see ../presentation/SKILL.md)
+│   └── representers/            ← Roar JSON decorators (see ../presentation/representers/SKILL.md)
+├── application/                 ← YOU ARE HERE: orchestrate requests
+│   ├── controllers/             ← Thin entry points per CLI / HTTP route
+│   ├── requests/                ← Validate input + map external API → entity (see ./requests/SKILL.md)
+│   ├── services/                ← Business logic steps (see ./services/SKILL.md)
+│   ├── prompts/                 ← LLM prompt builders
+├── domain/                      ← Decision-making objects
+│   └── entities/                ← Behavioral + DTO entities (see ../domain/SKILL.md, ../domain/entities/SKILL.md)
+└── infrastructure/              ← CRUD for outside resources
+    └── database/                ← ORM + Repository split (see ../infrastructure/database/SKILL.md)
+        ├── orm/                 ← Thin Sequel models (see ../infrastructure/database/orm/SKILL.md)
+        └── repositories/        ← ORM ↔ entity mapping (see ../infrastructure/database/repositories/SKILL.md)
 ```
 
 **Key invariants:**

@@ -125,7 +125,10 @@ Evans' DDD Sample models `Delivery` as a value object, but `Delivery` *belongs t
 
 ## Entity & Value Object Implementation
 
-Entities and value objects take their collaborators in the constructor and compute derived data on demand via memoized methods. Plain Ruby classes, not `Dry::Struct`.
+Two flavors of entity coexist in this project, distinguished by whether the entity carries behavior:
+
+- **Behavioral entities** — take collaborators in the constructor and compute derived data on demand via memoized methods. Plain Ruby classes. This is the default for entities that own domain logic. The rest of this section documents this style. Example: `AttendanceReport`.
+- **DTO entities** — passive data carriers that cross boundaries (DB row, validated request payload). `Dry::Struct` with strict types, plus a `to_attr_hash` method. See [`./entities/SKILL.md`](./entities/SKILL.md) for conventions and the inline `Entity::PromptLog` example.
 
 **Principle:** Objects own their computation. The constructor receives domain objects; derived values are exposed as methods. No procedural factory that pre-computes everything and stuffs it into a passive struct.
 
@@ -200,7 +203,7 @@ end
 | Simple immutable data holder (2–3 fields, no logic) | `Data.define` |
 | Value equality | Implement `==`, `eql?`, `hash` |
 
-**Anti-pattern:** `Dry::Struct` + `.build` factory that procedurally computes values and stores them as inert attributes. This separates computation from the object that should own it, producing a "dumb struct" filled by an external procedure.
+**Anti-pattern (clarified):** The problem is **passive struct + external factory that computes fields**, not `Dry::Struct` itself. A `Dry::Struct` used purely as a DTO — values come straight from the boundary it maps to or from, nothing is calculated in flight — is fine, and is what `Entity::PromptLog` does. The anti-pattern is when an `Entity.build(...)` factory pre-computes totals, statuses, or relationships and stuffs the results into a passive struct, separating computation from the object that should own it.
 
 ## Collection Value Objects
 
