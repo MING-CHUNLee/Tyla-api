@@ -6,14 +6,44 @@ module Tyla
     # envelope expects. Keep this table in one place so route handlers do
     # not pattern-match raw tags inline.
     SERVICE_FAILURE_STATUS = {
-      bad_request:    :bad_request,
-      cannot_process: :cannot_process,
-      db_error:       :internal_error
+      bad_request:      :bad_request,
+      unauthorized:     :unauthorized,
+      not_found:        :not_found,
+      cannot_process:   :cannot_process,
+      upstream_error:   :upstream_error,
+      upstream_timeout: :upstream_timeout,
+      db_error:         :internal_error
     }.freeze
 
     route do |r|
       r.on 'api' do
         r.on 'v1' do
+          r.on 'tutor_chats' do
+            # POST /api/v1/tutor_chats
+            # Accepts { course_id, project_id, student_id, prompt, history? } +
+            # X-LLM-Key header. Re-runs the guard server-side (defence in
+            # depth), composes the tutor system prompt from on-disk artefacts,
+            # and forwards to the tutor LLM. Returns the LLM reply or a refusal.
+            r.post do
+              outcome = Services::RunTutorChat.new.call(r.params, request.env)
+
+              if outcome.failure?
+                tag, message, errors = outcome.failure
+                result = Response::Result.new(
+                  status:  SERVICE_FAILURE_STATUS.fetch(tag, :internal_error),
+                  message: message,
+                  errors:  errors
+                )
+                rep = Representer::HttpResponse.new(result)
+                r.halt(rep.http_status_code, rep.to_json)
+              end
+
+              kind, payload = outcome.value!
+              response.status = kind == :llm_unavailable ? 202 : 200
+              payload
+            end
+          end
+
           r.on 'guard_checks' do
             # POST /api/v1/guard_checks
             # Accepts { course_id, project_id, student_id, prompt } + X-LLM-Key header.

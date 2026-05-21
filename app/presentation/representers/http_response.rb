@@ -20,19 +20,21 @@ module Tyla
       property :errors
 
       HTTP_CODE = {
-        ok:             200,
-        created:        201,
-        accepted:       202,
-        no_content:     204,
+        ok:               200,
+        created:          201,
+        accepted:         202,
+        no_content:       204,
 
-        bad_request:    400,
-        unauthorized:   401,
-        forbidden:      403,
-        not_found:      404,
-        conflict:       409,
-        cannot_process: 422,
+        bad_request:      400,
+        unauthorized:     401,
+        forbidden:        403,
+        not_found:        404,
+        conflict:         409,
+        cannot_process:   422,
 
-        internal_error: 500
+        internal_error:   500,
+        upstream_error:   502,
+        upstream_timeout: 504
       }.freeze
 
       def http_status_code
