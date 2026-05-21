@@ -7,14 +7,15 @@ require 'uri'
 module Tyla
   module Infrastructure
     class OpenAiClient
-      ENDPOINT      = URI('https://api.openai.com/v1/chat/completions')
-      READ_TIMEOUT  = 30
-      OPEN_TIMEOUT  = 10
-      DEFAULT_MODEL = 'gpt-4o-mini'
+      DEFAULT_ENDPOINT = 'https://api.openai.com/v1/chat/completions'
+      READ_TIMEOUT     = 30
+      OPEN_TIMEOUT     = 10
+      DEFAULT_MODEL    = 'gpt-4o-mini'
 
-      def initialize(api_key:, model: DEFAULT_MODEL)
-        @api_key = api_key
-        @model   = model
+      def initialize(api_key:, model: nil, endpoint: nil)
+        @api_key  = api_key
+        @model    = model    || ENV.fetch('LLM_MODEL', DEFAULT_MODEL)
+        @endpoint = URI(endpoint || ENV.fetch('OPENAI_API_BASE', DEFAULT_ENDPOINT))
       end
 
       def send_prompt(system_prompt:, user_message:, history: [])
@@ -32,12 +33,13 @@ module Tyla
       private
 
       def post_json(body)
-        http = Net::HTTP.new(ENDPOINT.host, ENDPOINT.port)
-        http.use_ssl = true
+        warn "[OpenAiClient] POST #{@endpoint} (key: #{@api_key[0..6]}...)"
+        http = Net::HTTP.new(@endpoint.host, @endpoint.port)
+        http.use_ssl = @endpoint.scheme == 'https'
         http.read_timeout = READ_TIMEOUT
         http.open_timeout = OPEN_TIMEOUT
 
-        request = Net::HTTP::Post.new(ENDPOINT.request_uri)
+        request = Net::HTTP::Post.new(@endpoint.request_uri)
         request['Authorization'] = "Bearer #{@api_key}"
         request['Content-Type']  = 'application/json'
         request.body = body
