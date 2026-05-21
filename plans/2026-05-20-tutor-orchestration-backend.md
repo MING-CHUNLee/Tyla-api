@@ -155,8 +155,8 @@ app/
 │   │   └── tutors/
 │   │       ├── tutor-socratic/TUTOR.md    ← EXISTING (unchanged)
 │   │       └── tutor-guide/TUTOR.md       ← EXISTING (unchanged)
-│   └── routes/
-│       └── app_routes.rb                  ← thin controller (pattern-match on Result)
+│   └── controllers/
+│       └── api.rb                          ← thin controller (pattern-match on Result)
 ├── domain/
 │   └── values/
 │       ├── guard_result.rb                ← Struct: allowed, reason, probability
@@ -819,11 +819,11 @@ end
 | `spec/application/services/tutor_orchestrator_spec.rb` | (a) Allowed path calls LLM and returns `Success(TutorChatResult.ok)`; (b) Refused path returns `Success(TutorChatResult.refused)` with templated content — **LLM is NOT called**; (c) History is truncated to `MAX_HISTORY_TURNS * 2` messages; (d) File content is truncated at `MAX_FILE_LINES`; (e) LLM timeout → `Failure[:upstream_timeout]`; (f) LLM error → `Failure[:upstream_error]`; (g) Unknown mode → `Failure[:bad_mode]`. |
 | `spec/application/services/rate_limiter_spec.rb` | (a) Allows under limit; (b) Returns `Failure[:rate_limited]` at limit; (c) Window expires and allows again; (d) Thread-safety (concurrent requests don't corrupt counter). |
 | `spec/application/services/handle_tutor_chat_spec.rb` | (a) Missing provider header → `Failure[:unauthorized]`; (b) Missing key header → `Failure[:unauthorized]`; (c) Rate limited → `Failure[:rate_limited]`; (d) Pending row written before LLM call; (e) Row updated after LLM success; (f) `X-LLM-Key` never appears in any DB column; (g) Orchestrator `Failure` propagated without DB update. |
-| `spec/application/routes/prompt_logs_route_spec.rb` | (a) 422 on missing `mode`/`userPrompt`; (b) 422 on invalid mode value; (c) 422 on oversized `context.files` (> 1 MB); (d) 422 on oversized `history` (> 500 KB); (e) 401 on missing headers; (f) 429 on rate limit; (g) 200 `status:'ok'` happy path; (h) 200 `status:'refused'` when guard blocks; (i) 502/504 on LLM errors; (j) DB row written exactly once per request; (k) `X-LLM-Key` does not appear in response body. |
+| `spec/application/controllers/prompt_logs_route_spec.rb` | (a) 422 on missing `mode`/`userPrompt`; (b) 422 on invalid mode value; (c) 422 on oversized `context.files` (> 1 MB); (d) 422 on oversized `history` (> 500 KB); (e) 401 on missing headers; (f) 429 on rate limit; (g) 200 `status:'ok'` happy path; (h) 200 `status:'refused'` when guard blocks; (i) 502/504 on LLM errors; (j) DB row written exactly once per request; (k) `X-LLM-Key` does not appear in response body. |
 | `spec/infrastructure/llm/openai_client_spec.rb` | WebMock-stubbed; auth header, body shape, 30s timeout, non-2xx → `LlmError::Upstream`, Net timeout → `LlmError::Timeout`. |
 | `spec/infrastructure/middleware/key_scrubber_spec.rb` | (a) `sk-xxx` in response body is replaced with `[REDACTED]`; (b) `X-LLM-Key: sk-xxx` pattern redacted; (c) Clean bodies pass through unchanged. |
 | `spec/application/prompts/builders/judge_system_prompt_spec.rb` | `build` replaces `{{jailbreakCatalog}}` with catalog content; result is non-empty. |
-| `spec/application/routes/header_access_spec.rb` (D3) | Pins that `r.headers['X-LLM-Provider']` correctly reads the `X-LLM-Provider` HTTP header via `plugin :request_headers`. Fails loudly if the plugin is ever removed. |
+| `spec/application/controllers/header_access_spec.rb` (D3) | Pins that `r.headers['X-LLM-Provider']` correctly reads the `X-LLM-Provider` HTTP header via `plugin :request_headers`. Fails loudly if the plugin is ever removed. |
 | `spec/application/services/handle_tutor_chat_spec.rb` (structured log) | Captures `$stdout` during a request; asserts the emitted JSON line contains `student_id`, `mode`, `guard_allowed`, `status` — and does **not** contain `sk-` or `X-LLM-Key`. |
 
 ---
