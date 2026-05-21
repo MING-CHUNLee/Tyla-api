@@ -17,13 +17,10 @@ module Tyla
         parsed      = JSON.parse(response.content)
         attack_prob = Float(parsed.fetch('attack-probability'))
         evaluation  = parsed.fetch('evaluation')
-        benign_prob = (1.0 - attack_prob).round(4)
-        allowed     = attack_prob < Values::AttackPolicy::THRESHOLD
 
         Values::GuardResult.new(
-          allowed:     allowed,
           reason:      evaluation,
-          probability: { attack: attack_prob, benign: benign_prob }
+          probability: { attack: attack_prob }
         )
       rescue StandardError => e
         warn "[GuardAgent] judge unavailable (#{e.class}): #{e.message}"
