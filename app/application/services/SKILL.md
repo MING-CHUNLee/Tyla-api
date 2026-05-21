@@ -11,11 +11,17 @@ encapsulates operations that **span across layers, components, or modules**.
 - The action reaches across **multiple domain models**
 - The logic is too complex or stateful for a controller
 
+This project's convention: every service is a class under
+`Tyla::Services::` with a `#call` method that returns a `Dry::Monads`
+`Result` (`Success(...)` or `Failure[:tag, message]`). Controllers
+unwrap the Result and translate it to HTTP — they do not branch on
+service internals.
+
 ---
 
 ## Transaction Script Pattern
 
-Controller routes are **transaction scripts** — a procedural design pattern:
+Controllers are **transaction scripts** — a procedural design pattern:
 
 ```
 inputs → [step → step → step] → output
@@ -33,71 +39,84 @@ inputs → [step → step → step] → output
 - Controller must know the entire workflow
 - Controller must error-check at every step
 - Controller must know the correct error message per step
-- Results in deeply nested if/else or try/catch chains
+- Results in deeply nested if/else or begin/rescue chains
 
-**Solution:** Extract steps into a Service Object using Result Monads.
+**Solution:** Extract steps into a Service Object using Result monads.
 
 ---
 
 ## Single-Step Service Object
 
-Some transactions entail only one activity (one DB call, one API call, one file write).
+Some transactions entail only one activity (one DB call, one API call,
+one file write).
 
-```typescript
-// services/list-projects.ts
-class ListProjectsService {
-  async call(projectList: string[]): Promise<Result<Project[], string>> {
-    try {
-      const projects = await Repository.findAll(projectList)
-      return Success(projects)
-    } catch (error) {
-      return Failure('Could not access database')
-    }
-  }
-}
+```ruby
+# app/application/services/list_projects.rb
+module Tyla
+  module Services
+    class ListProjects
+      include Dry::Monads[:result]
+
+      def call(project_list)
+        Success(Repository::Projects.find_all(project_list))
+      rescue Sequel::Error
+        Failure[:db_error, 'could not access database']
+      end
+    end
+  end
+end
 ```
 
 Controller calls it and unwraps:
 
-```typescript
-const result = await new ListProjectsService().call(session.watching)
-if (result.isFailure()) {
-  return renderError(result.error)
-}
-const projects = result.value
+```ruby
+outcome = Services::ListProjects.new.call(session_watching)
+if outcome.failure?
+  tag, message = outcome.failure
+  # render error using SERVICE_FAILURE_STATUS table in the controller
+end
+projects = outcome.value!
 ```
 
 ---
 
 ## Multi-Step Service Object
 
-When a service has many sequential steps, naive if/else chaining is unreadable:
+When a service has many sequential steps, naive if/else chaining is
+unreadable:
 
-```typescript
-// BAD — deeply nested, separates result from its error
-const first = await stepOne(input)
-if (first.success) {
-  const second = await stepTwo(first.value)
-  if (second.success) {
-    const third = await stepThird(second.value)
-    if (third.success) { ... }
-    else return Failure(third.error)
-  } else return Failure(second.error)
-} else return Failure(first.error)
+```ruby
+# BAD — deeply nested, separates result from its error
+first = step_one(input)
+if first.success?
+  second = step_two(first.value!)
+  if second.success?
+    third = step_three(second.value!)
+    if third.success?
+      ...
+    else
+      return Failure(third.failure)
+    end
+  else
+    return Failure(second.failure)
+  end
+else
+  return Failure(first.failure)
+end
 ```
 
 Problems:
 - Method becomes too long
 - Code nests deeply
-- `first` variable appears at top and bottom (hard to read)
+- The variable `first` is referenced top and bottom (hard to read)
 
 ---
 
-## Railway Oriented Programming (ROP)
+## Railway Oriented Programming (ROP) with `Dry::Monads::Do`
 
 ROP solves chaining by **binding monadic steps**:
 
-- **Success?** → send the Success value to the next step
+- **Success?** → unwrap the value and pass it to the next step
 - **Failure?** → short-circuit immediately, skip all remaining steps
 
 Two tracks like a railway — success track and failure track:
@@ -109,53 +128,61 @@ Two tracks like a railway — success track and failure track:
   Error track (any failure exits here)  → Error
 ```
 
-```typescript
-// GOOD — flat chain, each step returns Result
-class AddProjectService {
-  async call(input: RequestInput): Promise<Result<Project, string>> {
-    return pipe(
-      input,
-      (i) => this.parseUrl(i),
-      (r) => r.isSuccess() ? this.findProject(r.value) : r,
-      (r) => r.isSuccess() ? this.storeProject(r.value) : r,
-    )
-  }
+In this project we use `Dry::Monads::Do` (the `yield` notation) — it is
+the successor to the now-deprecated `dry-transaction` gem, and it
+flattens the chain so each step reads like a normal assignment while
+still short-circuiting on `Failure`:
 
-  private parseUrl(input: RequestInput): Result<ParsedUrl, string> {
-    const match = input.remoteUrl.match(/github\.com\/(.+?)\/(.+)$/)
-    if (!match) return Failure(`Invalid GitHub URL: ${input.remoteUrl}`)
-    return Success({ ownerName: match[1], projectName: match[2] })
-  }
+```ruby
+# GOOD — flat chain, each step returns Result
+module Tyla
+  module Services
+    class ListPromptLogs
+      include Dry::Monads[:result]
+      include Dry::Monads::Do
 
-  private async findProject(parsed: ParsedUrl): Promise<Result<ProjectData, string>> {
-    try {
-      const local = await Repository.findByFullName(parsed.ownerName, parsed.projectName)
-      if (local) return Success({ localProject: local })
-      const remote = await GithubGateway.fetch(parsed.ownerName, parsed.projectName)
-      return Success({ remoteProject: remote })
-    } catch {
-      return Failure('Could not find that project')
-    }
-  }
+      REQUIRED_FILTERS = %w[student_id course_id project_id].freeze
 
-  private async storeProject(data: ProjectData): Promise<Result<Project, string>> {
-    try {
-      if (data.remoteProject) {
-        const saved = await Repository.create(data.remoteProject)
-        return Success(saved)
-      }
-      return Success(data.localProject!)
-    } catch {
-      return Failure('Having trouble accessing the database')
-    }
-  }
-}
+      def call(params)
+        filters  = yield validate_filters(params)
+        entities = yield fetch_logs(filters)
+        Success(entities)
+      end
+
+      private
+
+      def validate_filters(params)
+        missing = REQUIRED_FILTERS.reject do |key|
+          value = params[key]
+          value.is_a?(String) && !value.strip.empty?
+        end
+        return Success(REQUIRED_FILTERS.each_with_object({}) { |k, h| h[k.to_sym] = params[k] }) if missing.empty?
+
+        Failure[:bad_request, "missing required query parameters: #{missing.join(', ')}"]
+      end
+
+      def fetch_logs(filters)
+        Success(Repository::PromptLogs.find_all(filters))
+      rescue Sequel::Error
+        Failure[:db_error, 'could not load prompt logs']
+      end
+    end
+  end
+end
 ```
 
 **Rules for each step:**
-1. Each step is a **method** taking the previous step's success value
-2. Each step must return a **Result** (`Success(...)` or `Failure(...)`)
+1. Each step is a **private method** taking the previous step's success value
+2. Each step must return a **Result** (`Success(...)` or `Failure[:tag, message]`)
 3. On failure, the chain short-circuits — remaining steps are skipped
+4. Failures carry a **tag symbol** (`:bad_request`, `:db_error`, `:unauthorized`, ...)
+   so the controller can map them to HTTP without parsing message strings
+
+### Tag → HTTP mapping lives in the controller
+
+Services do not know about HTTP. The controller owns one place where
+failure tags become `Response::Result` statuses
+(see `SERVICE_FAILURE_STATUS` in `app/application/controllers/api.rb`).
 
 ---
 
@@ -163,19 +190,27 @@ class AddProjectService {
 
 ```
 services/
-├── code-confirmer.ts       ← Confirms code changes with user before applying
-├── context-builder.ts      ← Builds context for LLM from conversation + files
-├── diff-engine.ts          ← Computes diffs between file versions
-├── edit-staging-service.ts ← Stages file edits before committing
-├── evaluator.ts            ← Evaluates LLM output quality
-├── file-read-service.ts    ← Reads files with error handling
-├── history-summarizer.ts   ← Summarizes conversation history
-├── intent-router.ts        ← Routes intent to correct use-case
-├── knowledge-base.ts       ← Manages knowledge entries
-├── mode-manager.ts         ← Manages CLI operating modes
-├── r-environment-service.ts← R environment setup and validation
-└── slash-command-router.ts ← Routes slash commands to handlers
+├── create_prompt_log.rb   ← Normalises params, validates via contract, persists — POST handler
+├── guard_agent.rb         ← Wraps an LLM call that classifies a prompt as attack vs. benign
+├── handle_tutor_chat.rb   ← Orchestrates a tutor turn end-to-end (rate limit → pending row → LLM → backfill)
+├── list_prompt_logs.rb    ← Lists prompt logs scoped to (student_id, course_id, project_id)
+├── policy_loader.rb       ← Loads the guard / tutor policy YAML
+├── rate_limiter.rb        ← In-memory per-student token bucket (Result-returning `check!`)
+├── solution_loader.rb     ← Loads reference solutions for a project
+├── tutor_chat_input.rb    ← Value object — coerces raw request hash into a typed input
+├── tutor_chat_result.rb   ← Value object — the orchestrator's typed output
+└── tutor_orchestrator.rb  ← Builds the prompt, calls the LLM via guard, returns a TutorChatResult
 ```
 
-Services can be **directly integration-tested** independent of controllers —
-they are plain classes with a `call` method that take typed inputs and return Results.
+Canonical examples to read first:
+- [`list_prompt_logs.rb`](./list_prompt_logs.rb) — minimal two-step service: validate, then DB call
+- [`create_prompt_log.rb`](./create_prompt_log.rb) — three-step service with param normalisation,
+  contract validation (carrying an `errors` hash in the failure tuple), and DB persist
+- [`handle_tutor_chat.rb`](./handle_tutor_chat.rb) — multi-step orchestration with rate limiting,
+  pending-row pattern, structured logging, and tagged failures
+
+Services can be **directly integration-tested** independent of
+controllers — they are plain classes with a `call` method that take
+typed inputs and return Results. See
+`spec/application/services/*_spec.rb` for the testing pattern (in-memory
+Sequel DB + service called directly).
