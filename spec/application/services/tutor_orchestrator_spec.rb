@@ -58,11 +58,11 @@ module Tyla
       end
 
       def allowed_guard
-        Values::GuardResult.new(allowed: true, reason: 'ok', probability: { attack: 0.1, benign: 0.9 })
+        Values::GuardResult.new(reason: 'ok', probability: { attack: 0.1 })
       end
 
       def blocked_guard
-        Values::GuardResult.new(allowed: false, reason: 'jailbreak', probability: { attack: 0.9, benign: 0.1 })
+        Values::GuardResult.new(reason: 'jailbreak', probability: { attack: 0.9 })
       end
 
       def stub_guard(result)

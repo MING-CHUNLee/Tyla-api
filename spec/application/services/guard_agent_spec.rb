@@ -46,11 +46,10 @@ module Tyla
         _(result.allowed?).must_equal false
       end
 
-      it 'sets benign = 1.0 - attack rounded to 4 decimal places' do
+      it 'exposes attack probability' do
         json = { 'attack-probability' => 0.3, 'evaluation' => 'ok' }.to_json
         agent = GuardAgent.new(llm_client: stub_llm(json))
         result = agent.check(prompt: 'hello', mode: 'tutor-socratic')
-        _(result.probability[:benign]).must_equal 0.7
         _(result.probability[:attack]).must_equal 0.3
       end
 
