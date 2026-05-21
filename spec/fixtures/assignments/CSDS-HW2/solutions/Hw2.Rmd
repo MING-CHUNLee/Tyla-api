@@ -1,0 +1,261 @@
+---
+title: "Hw2"
+author: '113078513'
+date: "2025-02-25"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+  html_document:
+    df_print: paged
+header-includes:
+  - \usepackage{titlesec}
+  - \titleformat*{\subsection}{\small\itshape}
+---
+
+\subsection*{ AI assistance:1.I asked AI to translate the English questions into my native language. 2.AI explain the formulae used in the questions to me.}
+
+## Question 1
+
+a)  Create and visualize a new “Distribution 2”:a combined dataset (n=800) that is negatively skewed
+
+```{r}
+# Allow simulations to be reproducible
+set.seed(100)
+
+# Three normally distributed data sets with modified parameters for negative skewness
+
+# Mean is lower and higher sd in d1 make it spread more into the left tail.
+d1 <- rnorm(n=200, mean=13, sd=30)
+# Let most of the values be at d2, mainly to avoid double peaks.
+d2 <- rnorm(n=550, mean=65, sd=5)
+# Slightly higher values, but fewer
+d3 <- rnorm(n=50, mean=70, sd=2) 
+
+# Combining them into a composite dataset
+d123 <- c(d1, d2, d3)
+
+# Plot the density function of d123
+plot(density(d123), col="blue", lwd=2,main = "Distribution 2")
+
+# Add vertical lines showing mean and median
+# Solid line for the mean.
+abline(v=mean(d123))
+#Dashed line for the median.
+abline(v=median(d123), lty="dashed") #Dashed line
+```
+
+------------------------------------------------------------------------
+
+b)  Create a “Distribution 3”:Normally distributed (bell-shaped, symmetric)
+
+```{r}
+# Allow simulations to be reproducible
+set.seed(777)
+# Generate a normally distributed dataset with 800 observations.
+d <- rnorm(800, mean=35, sd=0.5)
+ 
+# Let’s plot the density function of d
+plot(density(d), col="blue", lwd=2,main = "Distribution 3")
+
+
+# Add vertical lines showing mean and median
+# Solid line for the mean.
+abline(v=mean(d)) 
+#Dashed line for the median.
+abline(v=median(d), lty="dashed") 
+```
+
+------------------------------------------------------------------------
+
+c)  In general, which measure of central tendency (mean or median) do you think will be more sensitive (will change more) to outliers being added to your data?
+
+```         
+Answer: 
+The mean is more sensitive to outliers than the median 
+because it's calculated by summing all the values and dividing by the number of observations,
+whereas the median depends on the position rather than the value.
+
+
+ref:https://www.linkedin.com/advice/1/how-do-outliers-affect-mean-median-mode-data-set-i4nee
+```
+
+------------------------------------------------------------------------
+
+## Question 2
+
+a)  Create a random dataset (call it rdata) that is normally distributed with: n=2000, mean=0, sd=1. Draw a density plot and put a solid vertical line on the mean, and dashed vertical lines at the 1st, 2nd, and 3rd standard deviations to the left and right of the mean. You should have a total of 7 vertical lines (one solid, six dashed).
+
+```{R}
+# Allow simulations to be reproducible
+set.seed(123)
+# Create a normally distributed with: n=2000, mean=0, sd=1.
+rdata <- rnorm(n = 2000, mean = 0, sd = 1)
+# Plot the density of rdata.
+plot(density(rdata), col = "blue", lwd = 2, 
+     main = "Distribution")
+
+# Draw a solid　line at the mean.
+abline(v = mean(rdata), col = "red", lwd = 2)
+
+# Compute the standard deviation.
+sd_val <- sd(rdata)
+
+#  points corresponding to the 1st, 2nd, and 3rd quartiles
+sd_positions <- mean(rdata) + c(-3, -2, -1, 1, 2, 3) * sd_val
+
+abline(v = sd_positions, lty = "dashed", col = "darkgreen", lwd = 2)
+```
+
+------------------------------------------------------------------------
+
+b\. Using the quantile() function, which data points correspond to the 1st, 2nd, and 3rd quartiles (i.e., 25th, 50th, 75th percentiles) of rdata? How many standard deviations away from the mean (divide by standard-deviation; keep positive or negative sign) are those points corresponding to the 1st, 2nd, and 3rd quartiles?
+
+```{R}
+# Allow simulations to be reproducible
+set.seed(123)
+# Create a normally distributed with: n=2000, mean=0, sd=1.
+rdata <- rnorm(n = 2000, mean = 0, sd = 1)
+
+
+# Calculate the 1st, 2nd, and 3rd quartiles of rdata.
+quartiles_rdata <- quantile(rdata, probs = c(0.25, 0.5, 0.75))
+quartiles_rdata
+
+# z-score formulae:Calculate the number of standard deviations each quartile is from the mean.
+z_values <- (quartiles_rdata - mean(rdata)) / sd(rdata)
+z_values
+
+# Calculate IQR
+Q3=quantile(rdata, probs = c(0.75))
+Q1=quantile(rdata, probs = c(0.25))
+
+
+iqr = unname(Q3-Q1)
+iqr
+```
+
+------------------------------------------------------------------------
+
+c Now create a new random dataset that is normally distributed with: n=2000, mean=35, sd=3.5. In this distribution, how many standard deviations away from the mean (use positive or negative) are those points corresponding to the 1st and 3rd quartiles? Compare your answer to (b)
+
+```{R}
+# Allow simulations to be reproducible
+set.seed(123)
+# Create a normally distributed with: n=2000, mean=35, sd=3.5
+rdata2 <- rnorm(n = 2000, mean = 35, sd = 3.5)
+
+# Calculate the 1st and 3rd quartiles of rdata.
+quartiles2 <- quantile(rdata2, probs = c(0.25, 0.75))
+quartiles2
+
+# z-score formulae:Calculate the number of standard deviations each quartile is from the mean.
+z_values2 <- (quartiles2 -  mean(rdata2)) / sd(rdata2)
+z_values2
+
+# Calculate IQR
+Q3=quantile(rdata2, probs = c(0.75))
+Q1=quantile(rdata2, probs = c(0.25))
+iqr2 = unname(Q3-Q1)
+iqr2
+
+# Compare to  (b),  the values differ because the standard deviation is different (3.5 vs. 1).The difference in IQR between the two is also a testament to this.
+```
+
+------------------------------------------------------------------------
+
+c.  Finally, recall the dataset d123 shown in the description of question 1. In that distribution, how many standard deviations away from the mean (use positive or negative) are those data points corresponding to the 1st and 3rd quartiles? Compare your answer to (b)
+
+```{r}
+quartiles_d123 <- quantile(d123, probs = c(0.25, 0.75))
+
+
+z_values_d123 <- (quartiles_d123 - mean(d123)) / sd(d123)
+z_values_d123
+
+# Calculate IQR
+Q3=quantile(d123, probs = c(0.75))
+Q1=quantile(d123, probs = c(0.25))
+iqr_d123= unname(Q3-Q1)
+iqr_d123
+
+# Comparison:
+# d123 data is more dispersed or less tightly clustered around the median than (b).
+```
+
+------------------------------------------------------------------------
+
+## Question 3
+
+a)  From the question on the forum, which formula does Rob Hyndman’s answer (1st answer) suggest to use for bin widths/number? Also, what does the Wikipedia article say is the benefit of that formula?
+
+```         
+Answer: He has recommends the Freedman-Diaconis rule in his reply.
+```
+
+------------------------------------------------------------------------
+
+b)  
+
+```{r}
+#Allow simulations to be reproducible
+set.seed(123)
+
+rand_data <- rnorm(800, mean=20, sd = 5)
+n_rand <- length(rand_data)
+range_rand <- diff(range(rand_data))  # max - min
+
+# i. Sturges' formula
+k_sturges <- ceiling(log2(n_rand) + 1)
+h_sturges <- range_rand / k_sturges
+cat("The result of h_sturges:", h_sturges, "k_sturges:", k_sturges,"\n")
+
+# ii. Scott's rule
+h_scott <- 3.49 * sd(rand_data) / (n_rand^(1/3))
+k_scott <- ceiling(range_rand / h_scott)
+cat("The result of h_scott:", h_scott, "k_scott:", k_scott,"\n")
+
+# iii. Freedman-Diaconis rule
+h_fd <- 2 * IQR(rand_data) / (n_rand^(1/3))
+k_fd <- ceiling(range_rand / h_fd)
+cat("The result of h_fd:", h_fd, "k_fd:", k_fd)
+```
+
+------------------------------------------------------------------------
+
+c)  Repeat part (b) but let’s extend rand_data dataset with some outliers From your answers above, in which of the three methods does the bin width (h) change the least when outliers are added (i.e., which is least sensitive to outliers), and (briefly) WHY do you think that is?
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Generate the original dataset: 800 random numbers from a normal distribution with mean=20 and sd=5
+rand_data <- rnorm(800, mean = 20, sd = 5)
+
+# Extend the dataset by adding 10 outliers (uniformly distributed between 40 and 60)
+rand_data <- c(rand_data, runif(10, min = 40, max = 60))
+
+
+n_rand <- length(rand_data)
+range_rand <- diff(range(rand_data))  # max - min
+
+# i. Sturges' formula
+k_sturges <- ceiling(log2(n_rand) + 1)
+h_sturges <- range_rand / k_sturges
+cat("The result of h_sturges:", h_sturges, "k_sturges:", k_sturges,"\n")
+
+# ii. Scott's rule
+h_scott <- 3.49 * sd(rand_data) / (n_rand^(1/3))
+k_scott <- ceiling(range_rand / h_scott)
+cat("The result of h_scott:", h_scott, "k_scott:", k_scott,"\n")
+
+# iii. Freedman-Diaconis rule
+h_fd <- 2 * IQR(rand_data) / (n_rand^(1/3))
+k_fd <- ceiling(range_rand / h_fd)
+cat("The result of h_fd:", h_fd, "k_fd:", k_fd)
+
+# summary of the changes observed:
+#Sturges: h increases from approximately 2.75 to 4.69.
+#Scott: h increases from approximately 1.84 to 2.21.
+#Freedman-Diaconis: h changes very little, from approximately 1.37 to 1.39.
+# Thus, the Freedman-Diaconis method shows the least change in bin width when outliers are added.
+```
