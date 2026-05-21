@@ -194,7 +194,7 @@ services/
 ├── guard_agent.rb         ← Wraps an LLM call that classifies a prompt as attack vs. benign
 ├── handle_tutor_chat.rb   ← Orchestrates a tutor turn end-to-end (rate limit → pending row → LLM → backfill)
 ├── list_prompt_logs.rb    ← Lists prompt logs scoped to (student_id, course_id, project_id)
-├── policy_loader.rb       ← Loads the guard / tutor policy YAML
+├── policy_loader.rb       ← Loads the tutor policy MD by mode name (lives in tutor_chat/)
 ├── rate_limiter.rb        ← In-memory per-student token bucket (Result-returning `check!`)
 ├── solution_loader.rb     ← Loads reference solutions for a project
 ├── tutor_chat_input.rb    ← Value object — coerces raw request hash into a typed input

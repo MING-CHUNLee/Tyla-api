@@ -2,7 +2,7 @@
 
 require_relative '../../spec_helper'
 
-Dir.glob(File.join(ROOT, 'app/application/services/policy_loader.rb')).each { |f| require f }
+Dir.glob(File.join(ROOT, 'app/application/services/tutor_chat/policy_loader.rb')).each { |f| require f }
 
 describe Tyla::Services::PolicyLoader do
   let(:loader) { Tyla::Services::PolicyLoader.new }

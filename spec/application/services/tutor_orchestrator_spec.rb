@@ -4,12 +4,12 @@ require_relative '../../spec_helper'
 require 'dry/monads'
 
 %w[
-  app/application/services/solution_loader.rb
-  app/application/services/tutor_chat_result.rb
-  app/application/services/tutor_chat_input.rb
-  app/application/services/policy_loader.rb
-  app/application/services/guard_agent.rb
-  app/application/services/tutor_orchestrator.rb
+  app/application/services/tutor_chat/solution_loader.rb
+  app/application/services/tutor_chat/tutor_chat_result.rb
+  app/application/services/tutor_chat/tutor_chat_input.rb
+  app/application/services/tutor_chat/policy_loader.rb
+  app/application/services/guard/guard_agent.rb
+  app/application/services/tutor_chat/tutor_orchestrator.rb
 ].each { |f| require File.join(ROOT, f) }
 
 module Tyla

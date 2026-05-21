@@ -3,7 +3,7 @@
 module Tyla
   module Services
     class PolicyLoader
-      BASE_PATH = File.expand_path('../prompts/tutors', __dir__)
+      BASE_PATH = File.expand_path('../../prompts/tutors', __dir__)
 
       def load(mode)
         path = File.join(BASE_PATH, mode, 'TUTOR.md')
