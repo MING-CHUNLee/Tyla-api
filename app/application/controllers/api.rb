@@ -1,0 +1,61 @@
+# frozen_string_literal: true
+
+module Tyla
+  class Api
+    # Map service-level failure tags to the symbol the Response::Result
+    # envelope expects. Keep this table in one place so route handlers do
+    # not pattern-match raw tags inline.
+    SERVICE_FAILURE_STATUS = {
+      bad_request:    :bad_request,
+      cannot_process: :cannot_process,
+      db_error:       :internal_error
+    }.freeze
+
+    route do |r|
+      r.on 'api' do
+        r.on 'v1' do
+          r.on 'prompt_logs' do
+            # POST /api/v1/prompt_logs
+            # Accepts the CLI guard-log payload; see
+            # Request::CreatePromptLog for the validated input shape.
+            r.post do
+              outcome = Services::CreatePromptLog.new.call(r.params)
+
+              if outcome.failure?
+                tag, message, errors = outcome.failure
+                result = Response::Result.new(
+                  status:  SERVICE_FAILURE_STATUS.fetch(tag, :internal_error),
+                  message: message,
+                  errors:  errors
+                )
+                rep = Representer::HttpResponse.new(result)
+                r.halt(rep.http_status_code, rep.to_json)
+              end
+
+              response.status = Representer::HttpResponse::HTTP_CODE.fetch(:created)
+              Representer::PromptLog.new(outcome.value!).to_hash
+            end
+
+            # GET /api/v1/prompt_logs?student_id=X&course_id=Y&project_id=Z
+            r.get do
+              outcome = Services::ListPromptLogs.new.call(r.params)
+
+              if outcome.failure?
+                tag, message = outcome.failure
+                result = Response::Result.new(
+                  status:  SERVICE_FAILURE_STATUS.fetch(tag, :internal_error),
+                  message: message
+                )
+                rep = Representer::HttpResponse.new(result)
+                r.halt(rep.http_status_code, rep.to_json)
+              end
+
+              response.status = Representer::HttpResponse::HTTP_CODE.fetch(:ok)
+              outcome.value!.map { |entity| Representer::PromptLog.new(entity).to_hash }
+            end
+          end
+        end
+      end
+    end
+  end
+end
