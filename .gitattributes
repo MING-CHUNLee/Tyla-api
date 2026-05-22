@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.rb text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.rmd text eol=lf
+
+# Binary files — no line ending conversion
+*.png binary
+*.jpg binary
+*.docx binary
+*.pdf binary
