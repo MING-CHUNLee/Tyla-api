@@ -40,15 +40,15 @@ module Tyla
           return Success([:blocked, build_blocked_response(log.id, guard_result)])
         end
 
-        assignment = AssignmentLoader.load(params[:project_id])
-        solution   = SolutionLoader.load(params[:project_id])
-        student    = StudentFileLoader.load(params[:project_id])
-        persona    = TutorPersonaLoader.load(params[:project_id])
+        assignment = Infrastructure::Filesystem::AssignmentLoader.load(params[:project_id])
+        solution   = Infrastructure::Filesystem::SolutionLoader.load(params[:project_id])
+        student    = Infrastructure::Filesystem::StudentFileLoader.load(params[:project_id])
+        persona    = Infrastructure::Filesystem::TutorPersonaLoader.load(params[:project_id])
 
         system_prompt = Prompts::TutorSystemPrompt.build(
           policy_text:   persona,
           solution_text: "## Assignment\n#{assignment}\n\n## Reference Solution\n#{solution}",
-          context_files: [{ path: StudentFileLoader::FILENAME, content: student }]
+          context_files: [{ path: Infrastructure::Filesystem::StudentFileLoader::FILENAME, content: student }]
         )
         history   = Prompts::TutorSystemPrompt.truncate_history(params[:history])
         llm_reply = llm.send_prompt(

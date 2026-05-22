@@ -4,10 +4,10 @@ require_relative '../../spec_helper'
 require 'dry/monads'
 
 %w[
-  app/application/services/tutor_chat/solution_loader.rb
+  app/infrastructure/filesystem/tutor_chat/solution_loader.rb
+  app/infrastructure/filesystem/tutor_chat/policy_loader.rb
   app/application/services/tutor_chat/tutor_chat_result.rb
   app/application/services/tutor_chat/tutor_chat_input.rb
-  app/application/services/tutor_chat/policy_loader.rb
   app/application/services/guard/guard_agent.rb
   app/application/services/tutor_chat/tutor_orchestrator.rb
 ].each { |f| require File.join(ROOT, f) }
@@ -71,7 +71,7 @@ module Tyla
         g
       end
 
-      let(:policy_loader) { PolicyLoader.new }
+      let(:policy_loader) { Infrastructure::Filesystem::PolicyLoader.new }
 
       # ── Tests ─────────────────────────────────────────────────────────────────
 

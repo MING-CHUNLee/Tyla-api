@@ -42,7 +42,7 @@ module Tyla
 
         llm    = Infrastructure::LlmClient.for(provider: provider, api_key: api_key)
         guard  = GuardAgent.new(llm_client: llm)
-        policy = PolicyLoader.new
+        policy = Infrastructure::Filesystem::PolicyLoader.new
         orch   = TutorOrchestrator.new(llm_client: llm, guard: guard, policy_loader: policy)
 
         result = yield orch.call(request)

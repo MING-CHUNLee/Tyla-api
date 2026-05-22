@@ -20,7 +20,7 @@ module Tyla
         if guard_result.allowed?
           composed = Prompts::TutorSystemPrompt.build(
             policy_text:   policy_text,
-            solution_text: SolutionLoader.load_stub,
+            solution_text: Infrastructure::Filesystem::SolutionLoader.load_stub,
             context_files: request.context_files
           )
           truncated_history = Prompts::TutorSystemPrompt.truncate_history(request.history)

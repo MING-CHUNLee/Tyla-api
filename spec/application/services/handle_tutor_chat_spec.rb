@@ -25,11 +25,11 @@ require File.join(ROOT, 'app/infrastructure/database/orm/prompt_log_orm.rb')
 require File.join(ROOT, 'app/infrastructure/database/repositories/prompt_logs.rb')
 
 %w[
-  app/application/services/tutor_chat/solution_loader.rb
+  app/infrastructure/filesystem/tutor_chat/solution_loader.rb
+  app/infrastructure/filesystem/tutor_chat/policy_loader.rb
   app/application/services/tutor_chat/tutor_chat_result.rb
   app/application/services/tutor_chat/tutor_chat_input.rb
   app/application/services/guard/rate_limiter.rb
-  app/application/services/tutor_chat/policy_loader.rb
   app/application/services/guard/guard_agent.rb
   app/application/services/tutor_chat/tutor_orchestrator.rb
   app/application/services/tutor_chat/handle_tutor_chat.rb

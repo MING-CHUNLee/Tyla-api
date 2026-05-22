@@ -1,11 +1,11 @@
 # frozen_string_literal: true
 
-require_relative '../../spec_helper'
+require_relative '../../../spec_helper'
 
-Dir.glob(File.join(ROOT, 'app/application/services/tutor_chat/policy_loader.rb')).each { |f| require f }
+Dir.glob(File.join(ROOT, 'app/infrastructure/filesystem/tutor_chat/policy_loader.rb')).each { |f| require f }
 
-describe Tyla::Services::PolicyLoader do
-  let(:loader) { Tyla::Services::PolicyLoader.new }
+describe Tyla::Infrastructure::Filesystem::PolicyLoader do
+  let(:loader) { Tyla::Infrastructure::Filesystem::PolicyLoader.new }
 
   it 'loads tutor-socratic policy text successfully' do
     text = loader.load('tutor-socratic')

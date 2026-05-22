@@ -25,10 +25,10 @@ require File.join(ROOT, 'app/infrastructure/database/repositories/prompt_logs.rb
 
 %w[
   app/application/requests/tutor_chat.rb
-  app/application/services/tutor_chat/assignment_loader.rb
-  app/application/services/tutor_chat/solution_loader.rb
-  app/application/services/tutor_chat/student_file_loader.rb
-  app/application/services/tutor_chat/tutor_persona_loader.rb
+  app/infrastructure/filesystem/tutor_chat/assignment_loader.rb
+  app/infrastructure/filesystem/tutor_chat/solution_loader.rb
+  app/infrastructure/filesystem/tutor_chat/student_file_loader.rb
+  app/infrastructure/filesystem/tutor_chat/tutor_persona_loader.rb
   app/application/services/tutor_chat/run_tutor_chat.rb
 ].each { |f| require File.join(ROOT, f) }
 
