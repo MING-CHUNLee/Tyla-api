@@ -32,8 +32,8 @@ MindyCLI                          Tyla-api                        LLM Provider
    │                                  │ ─────────────────────────────>│
    │                                  │  { reply, usage }             │
    │                                  │ <─────────────────────────────│
-   │  { allowed, content, usage,      │                               │
-   │    log_id }                      │                               │
+   │  { log_id, status, content,      │                               │
+   │    usage }                       │                               │
    │ <────────────────────────────────│                               │
 ```
 
@@ -93,14 +93,24 @@ X-LLM-Key: sk-xxxxxxxxxxxx
 
 ## Response
 
-### Tutor reply (`200 OK`)
+All success responses share the same key set: `log_id`, `status`, `content`,
+`usage`. The HTTP status code and the body's `status` field are two
+independent layers — clients should key off `status` for branching.
+
+| `status` value | HTTP | Meaning |
+|---|---|---|
+| `done` | 200 | Guard allowed; tutor LLM replied |
+| `forbidden` | 200 | Guard refused; tutor LLM not called |
+| `unavailable` | 202 | Guard call failed (fail-open); tutor LLM replied |
+
+### Tutor reply — `status: "done"` (`200 OK`)
 
 The guard allowed the prompt and the tutor LLM returned a reply.
 
 ```json
 {
   "log_id":  101,
-  "allowed": true,
+  "status":  "done",
   "content": "Step 1: ...\nHint 1: ...",
   "usage":   { "input_tokens": 4321, "output_tokens": 512 }
 }
@@ -109,45 +119,49 @@ The guard allowed the prompt and the tutor LLM returned a reply.
 | Field | Type | Description |
 |-------|------|-------------|
 | `log_id` | integer | Database ID of this turn's `prompt_logs` row |
-| `allowed` | boolean | Always `true` on this branch |
-| `content` | string | The tutor LLM's reply |
-| `usage` | object | Token counts from the tutor LLM (`input_tokens`, `output_tokens`) |
+| `status` | string | One of `"done"`, `"forbidden"`, `"unavailable"` |
+| `content` | string | The tutor LLM's reply (or Socratic refusal text on `forbidden`) |
+| `usage` | object \| null | Token counts from the tutor LLM. `null` on `forbidden` (LLM not called). |
+
+`attack_probability` and `evaluation` are still persisted in `prompt_logs`
+and are available via `GET /api/v1/prompt_logs`; they are no longer emitted
+in this response.
 
 ---
 
-### Prompt blocked (`200 OK`)
+### Prompt blocked — `status: "forbidden"` (`200 OK`)
 
 The internal guard determined `attack_probability >= 0.7`. The tutor LLM is
-**not** called; the backend returns a refusal.
+**not** called; the backend returns a Socratic redirect sourced from the
+tutor's `TUTOR.md` (`## Refusal Message` section).
 
 ```json
 {
-  "log_id":             102,
-  "allowed":            false,
-  "attack_probability": 0.91,
-  "evaluation":         "Direct answer demand",
-  "refusal":            "Let's redirect. Instead of asking for the answer, what step would you take first to approach this problem?"
+  "log_id":  102,
+  "status":  "forbidden",
+  "content": "Let's redirect. Instead of asking for the answer, what step would you take first to approach this problem?",
+  "usage":   null
 }
 ```
 
-> **Frontend behaviour:** When `allowed` is `false`, display the `refusal`
-> string to the student. Don't retry the same prompt against `/tutor_chats`.
+> **Frontend behaviour:** When `status` is `"forbidden"`, display `content`
+> to the student. Don't retry the same prompt against `/tutor_chats`.
 
 ---
 
-### Guard unavailable (`202 Accepted`)
+### Guard unavailable — `status: "unavailable"` (`202 Accepted`)
 
 Same fail-open policy as `/guard_checks`. If the guard call fails (timeout,
-malformed JSON, etc.) the tutor LLM is still called, and the response carries
-a `warning` field.
+malformed JSON, etc.) the tutor LLM is still called. The HTTP status code
+(`202`) plus `status: "unavailable"` carry the signal — no extra `warning`
+string is emitted.
 
 ```json
 {
   "log_id":  103,
-  "allowed": true,
+  "status":  "unavailable",
   "content": "<tutor reply>",
-  "usage":   { "input_tokens": 4100, "output_tokens": 480 },
-  "warning": "guard skipped: llm unavailable"
+  "usage":   { "input_tokens": 4100, "output_tokens": 480 }
 }
 ```
 
@@ -164,11 +178,17 @@ All error responses share the common envelope used by the rest of the API:
 | HTTP Status | `status` value | Trigger condition |
 |-------------|----------------|-------------------|
 | `400` | `bad_request` | Body field validation failed (missing field, wrong type, history > 500 KB) |
-| `401` | `unauthorized` | `X-LLM-Key` header is absent or empty |
+| `403` | `forbidden` | `X-LLM-Key` header is absent or empty |
 | `404` | `not_found` | An assignment artefact file is missing on disk |
 | `500` | `internal_error` | Database write failed |
 | `502` | `upstream_error` | The tutor LLM call returned a non-2xx |
 | `504` | `upstream_timeout` | The tutor LLM call timed out (>30 s) |
+
+> **Why `403` and not `401`?** The presence of an `X-LLM-Key` header is a
+> client-side authorization concern (the user must supply their own key),
+> not a server-issued credential check. `403 Forbidden` is the correct
+> mapping: the request is well-formed and the server understood it, but the
+> client did not supply the credential the operation requires.
 
 ---
 
