@@ -8,6 +8,7 @@ module Tyla
     SERVICE_FAILURE_STATUS = {
       bad_request:      :bad_request,
       unauthorized:     :unauthorized,
+      forbidden:        :forbidden,
       not_found:        :not_found,
       cannot_process:   :cannot_process,
       upstream_error:   :upstream_error,
