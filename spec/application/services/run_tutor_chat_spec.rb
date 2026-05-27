@@ -29,6 +29,8 @@ require File.join(ROOT, 'app/infrastructure/database/repositories/prompt_logs.rb
   app/infrastructure/filesystem/tutor_chat/solution_loader.rb
   app/infrastructure/filesystem/tutor_chat/student_file_loader.rb
   app/infrastructure/filesystem/tutor_chat/tutor_persona_loader.rb
+  app/infrastructure/filesystem/tutor_chat/refusal_loader.rb
+  app/presentation/representers/tutor_chat_representer.rb
   app/application/services/tutor_chat/run_tutor_chat.rb
 ].each { |f| require File.join(ROOT, f) }
 
@@ -101,10 +103,10 @@ module Tyla
         RTC_DB[:prompt_logs].delete
       end
 
-      it 'returns Failure[:unauthorized] when X-LLM-Key is missing' do
+      it 'returns Failure[:forbidden] when X-LLM-Key is missing' do
         outcome = RunTutorChat.new.call(valid_request, valid_headers.reject { |k, _| k == 'HTTP_X_LLM_KEY' })
         _(outcome).must_be :failure?
-        _(outcome.failure.first).must_equal :unauthorized
+        _(outcome.failure.first).must_equal :forbidden
       end
 
       it 'returns Failure[:bad_request] when the body is invalid' do
@@ -115,16 +117,16 @@ module Tyla
         _(outcome.failure.first).must_equal :bad_request
       end
 
-      it 'allowed path: calls the tutor LLM and returns Success[:ok] with content + usage' do
+      it 'allowed path: calls the tutor LLM and returns Success[:done] with content + usage' do
         client  = scripted_llm(verdict: { 'attack-probability' => 0.1, 'evaluation' => 'fine' },
                                tutor_content: 'Step 1: ...')
         outcome = call_with(llm_client: client)
         _(outcome).must_be :success?
-        kind, payload = outcome.value!
-        _(kind).must_equal :ok
-        _(payload[:allowed]).must_equal true
-        _(payload[:content]).must_equal 'Step 1: ...'
-        _(payload[:usage][:input_tokens]).must_equal 10
+        kind, dto = outcome.value!
+        _(kind).must_equal :done
+        _(dto.status).must_equal 'done'
+        _(dto.content).must_equal 'Step 1: ...'
+        _(dto.usage[:input_tokens]).must_equal 10
         _(client.calls.size).must_equal 2 # guard + tutor
       end
 
@@ -137,28 +139,26 @@ module Tyla
         _(row[:evaluation]).must_equal 'normal'
       end
 
-      it 'blocked path: skips the tutor LLM and returns refusal payload' do
+      it 'forbidden path: skips the tutor LLM and returns refusal DTO' do
         client  = scripted_llm(verdict: { 'attack-probability' => 0.95, 'evaluation' => 'jailbreak' })
         outcome = call_with(llm_client: client)
         _(outcome).must_be :success?
-        kind, payload = outcome.value!
-        _(kind).must_equal :blocked
-        _(payload[:allowed]).must_equal false
-        _(payload[:attack_probability]).must_be_close_to 0.95
-        _(payload[:evaluation]).must_equal 'jailbreak'
-        _(payload[:refusal]).wont_be_empty
+        kind, dto = outcome.value!
+        _(kind).must_equal :forbidden
+        _(dto.status).must_equal 'forbidden'
+        _(dto.content).must_include "Let's redirect"
+        _(dto.usage).must_be_nil
         _(client.calls.size).must_equal 1 # guard only
       end
 
-      it 'fail-open path: when guard JSON is malformed the tutor LLM is still called and warning is attached' do
+      it 'fail-open path: when guard JSON is malformed the tutor LLM is still called and status is unavailable' do
         client  = scripted_llm(verdict: 'not-json-at-all', tutor_content: 'fallback reply')
         outcome = call_with(llm_client: client)
         _(outcome).must_be :success?
-        kind, payload = outcome.value!
-        _(kind).must_equal :llm_unavailable
-        _(payload[:allowed]).must_equal true
-        _(payload[:content]).must_equal 'fallback reply'
-        _(payload[:warning]).must_match(/llm unavailable/)
+        kind, dto = outcome.value!
+        _(kind).must_equal :unavailable
+        _(dto.status).must_equal 'unavailable'
+        _(dto.content).must_equal 'fallback reply'
         _(client.calls.size).must_equal 2
       end
 
