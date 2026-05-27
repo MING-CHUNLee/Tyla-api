@@ -37,7 +37,7 @@ module Tyla
         log = persist_log(params, guard_result)
 
         if !llm_unavailable && !guard_result.allowed?
-          return Success([:blocked, build_blocked_response(log.id, guard_result)])
+          return Success([:forbidden, build_forbidden_response(log.id, params[:project_id])])
         end
 
         assignment = Infrastructure::Filesystem::AssignmentLoader.load(params[:project_id])
@@ -58,7 +58,7 @@ module Tyla
         )
 
         response = build_ok_response(log.id, llm_reply, llm_unavailable: llm_unavailable)
-        Success([llm_unavailable ? :llm_unavailable : :ok, response])
+        Success([llm_unavailable ? :unavailable : :done, response])
       rescue Infrastructure::LlmError::Timeout
         Failure[:upstream_timeout, 'LLM request timed out']
       rescue Infrastructure::LlmError::Upstream => e
@@ -85,25 +85,22 @@ module Tyla
         Repository::PromptLogs.create(entity)
       end
 
-      def build_blocked_response(log_id, guard_result)
-        {
-          log_id:             log_id,
-          allowed:            false,
-          attack_probability: guard_result.probability&.fetch(:attack),
-          evaluation:         guard_result.reason,
-          refusal:            Values::RefusalTemplates.for
-        }
+      def build_forbidden_response(log_id, project_id)
+        Response::TutorChat.new(
+          log_id:  log_id,
+          status:  'forbidden',
+          content: Infrastructure::Filesystem::RefusalLoader.load(project_id),
+          usage:   nil
+        )
       end
 
       def build_ok_response(log_id, llm_reply, llm_unavailable:)
-        payload = {
+        Response::TutorChat.new(
           log_id:  log_id,
-          allowed: true,
+          status:  llm_unavailable ? 'unavailable' : 'done',
           content: llm_reply.content,
           usage:   llm_reply.usage
-        }
-        payload[:warning] = 'guard skipped: llm unavailable' if llm_unavailable
-        payload
+        )
       end
     end
   end

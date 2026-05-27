@@ -7,6 +7,7 @@ require_relative '../../../spec_helper'
   app/infrastructure/filesystem/tutor_chat/solution_loader.rb
   app/infrastructure/filesystem/tutor_chat/student_file_loader.rb
   app/infrastructure/filesystem/tutor_chat/tutor_persona_loader.rb
+  app/infrastructure/filesystem/tutor_chat/refusal_loader.rb
 ].each { |f| require File.join(ROOT, f) }
 
 module Tyla
@@ -34,15 +35,22 @@ module Tyla
           _(text).must_include 'Tutor-Guide Mode'
         end
 
+        it 'RefusalLoader extracts the ## Refusal Message section from TUTOR.md' do
+          text = RefusalLoader.load('HW2')
+          _(text).wont_be_empty
+          _(text).must_include "Let's redirect"
+        end
+
         it 'SolutionLoader still answers .load_stub for the legacy orchestrator' do
           _(SolutionLoader.load_stub).must_equal ''
         end
 
-        it 'all four loaders ignore project_id in Phase 1' do
+        it 'all five loaders ignore project_id in Phase 1' do
           _(AssignmentLoader.load('anything')).wont_be_empty
           _(SolutionLoader.load('anything')).wont_be_empty
           _(StudentFileLoader.load('anything')).wont_be_empty
           _(TutorPersonaLoader.load('anything')).wont_be_empty
+          _(RefusalLoader.load('anything')).wont_be_empty
         end
       end
     end

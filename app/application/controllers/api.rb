@@ -38,9 +38,9 @@ module Tyla
                 r.halt(rep.http_status_code, rep.to_json)
               end
 
-              kind, payload = outcome.value!
-              response.status = kind == :llm_unavailable ? 202 : 200
-              payload
+              kind, dto = outcome.value!
+              response.status = kind == :unavailable ? 202 : 200
+              Representer::TutorChat.new(dto).to_hash
             end
           end
 
