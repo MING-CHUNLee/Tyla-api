@@ -70,10 +70,11 @@ No native dependencies, no schema changes, no migration concerns.
 | `tiktoken_ruby` | Accurate for OpenAI BPE; matches `usage.input_tokens` within ~1 %. | Native extension; build complications on Windows (our dev env is win32); only covers OpenAI families. | ❌ v1; reconsider once we have logged drift data. |
 | `tokenizers` (HF) | Universal. | ~50 MB on disk; loads model files; overkill. | ❌ |
 
-**Calibration plan:** every reply already carries `usage.input_tokens`. We will
-log `estimated_tokens / actual_input_tokens` for the first ~200 requests after
-deploy, then revisit the constant (currently planned: **3.5 chars per token**
-to slightly over-reserve for mixed English + CJK + R code).
+**Calibration plan:** every reply already carries `usage.input_tokens`. If
+drift is suspected post-deploy, drop a temporary `warn` line emitting
+`estimated / usage.input_tokens` and grep a sample of logs — **no DB columns,
+no permanent structured logging**. Revisit `CHARS_PER_TOKEN` (currently **3.5**,
+slightly over-reserving for mixed English + CJK + R code) once data is in hand.
 
 > **Why a seam matters:** if we hard-code `text.length / 4` into
 > `BudgetAwarePromptAssembler`, swapping to `tiktoken` later means changing
@@ -152,14 +153,28 @@ than passed in by callers — keeps the wiring small.
 
 ### Table (v1)
 
+Channel detection is **host-based** (parse the URI and compare `host`) rather
+than substring-regex over the full URL. Host comparison is anchored by
+construction — no `evil.example.com.models.github.ai` shenanigans, no
+trailing-slash gotchas. GitHub Models is matched **first**; native provider
+endpoints fall through automatically.
+
 ```ruby
 CHANNELS = {
-  github_models_free: { input: 8_000,   output: 4_000, match: /models\.(inference\.ai\.azure|github\.ai)/ },
-  openai_direct:      { input: 128_000, output: 4_096, match: /api\.openai\.com/ },
-  anthropic_direct:   { input: 200_000, output: 4_096, match: /api\.anthropic\.com/ },
-  unknown:            { input: 8_000,   output: 4_000, match: nil }  # safest fallback
+  github_models_free: { input: 8_000,   output: 4_000,
+                        hosts: %w[models.inference.ai.azure.com models.github.ai] },
+  openai_direct:      { input: 128_000, output: 4_096,
+                        hosts: %w[api.openai.com] },
+  anthropic_direct:   { input: 200_000, output: 4_096,
+                        hosts: %w[api.anthropic.com] },
+  unknown:            { input: 8_000,   output: 4_000, hosts: [] }  # safest fallback
 }.freeze
 ```
+
+Match order: `github_models_free` → `openai_direct` → `anthropic_direct` → `unknown`.
+Our current deployment hits `models.inference.ai.azure.com` (GitHub Models),
+so the GitHub branch is the hot path; native-provider hosts are supported
+automatically when a student switches keys.
 
 **Fallback rationale:** when the endpoint doesn't match a known channel, fall
 back to the **GitHub Models limits** rather than the larger provider-direct
@@ -177,11 +192,14 @@ budget.output_reservation   # => 4_000
 budget.channel              # => :github_models_free (for logging)
 ```
 
-Note: `output_reservation` is informational for now — neither
+**`output_reservation` is enforced in this PR.** Both
 [OpenAiClient#send_prompt](../app/infrastructure/llm/openai_client.rb#L21-L31)
-nor the Anthropic client currently passes `max_tokens` through from this
-layer. A separate small change can wire `output_reservation` into the
-client `max_tokens` parameter so the provider enforces the same ceiling.
+and the Anthropic equivalent gain a `max_tokens:` parameter; `RunTutorChat`
+passes `budget.output_reservation` through. Without this, the budget
+arithmetic is incomplete: the provider could generate beyond our
+reservation and either (a) exceed GitHub Models' output cap (hard 400) or
+(b) silently shrink the *effective* input budget on retry. See §5 edited
+files and §6 Step 5.
 
 ### Out of scope for v1
 
@@ -244,7 +262,7 @@ ROLE_OVERHEAD       = 4    # per-message wrapper tokens (matches OpenAI's "every
 | `history` nil or empty | `selected = []`, no error. |
 | Single history turn larger than remaining budget | Drop it; do not split a turn. |
 | `student_file.content` empty | Treat as absent — no overhead. |
-| `persona + assignment + solution + prompt > budget` | Return `error` status (HTTP 502 or 500 — see error table in Issue 1). With GitHub Models' 8 K cap, this is realistic if an assignment is unusually long; the response should tell the student to start a new conversation. |
+| `persona + assignment + solution + prompt > budget` | Return `Failure[:context_overflow, ...]` → mapped to **HTTP 413 Payload Too Large** (`SERVICE_FAILURE_STATUS[:context_overflow] = 413` in `api.rb`). With GitHub Models' 8 K cap, this is realistic if an assignment is unusually long; the response should tell the student to start a new conversation. 413 is correct semantically — the request is well-formed but exceeds a size limit — and distinguishes this from 502 (upstream failure) and 422 (validation error). |
 | Unknown / unrecognised endpoint | Fallback channel (GitHub Models limits — 8 K input); `warn` line; processing continues. |
 
 ### What we deliberately do NOT do
@@ -253,8 +271,25 @@ ROLE_OVERHEAD       = 4    # per-message wrapper tokens (matches OpenAI's "every
   context. Drop the whole file or include the whole file.
 - **No "smart" turn truncation.** Mid-turn slicing changes the semantics of
   a message. Keep or drop, never split.
+- **No "skip-past-large-turn" walk.** Step 6 uses `break`, not `next`: as
+  soon as one turn doesn't fit, we stop and drop everything older too.
+  Rationale: contiguous recent context preserves conversational coherence;
+  cherry-picking smaller older turns over a skipped huge one produces a
+  visibly broken dialogue ("jumpy" history) for marginal token savings.
+  Locked by spec — see §6 Step 6.
 - **No telemetry in response.** Per Issue 1, "client cannot detect anomalies."
   We log trimming server-side only.
+
+### Composition note (assembler ↔ TutorSystemPrompt.build)
+
+`TutorSystemPrompt.build`'s signature stays unchanged
+(`policy_text:, solution_text:, context_files:`). The assembler **internally**
+concatenates `"## Assignment\n#{assignment}\n\n## Reference Solution\n#{solution}"`
+into `solution_text` before calling `build`. This keeps `build` a pure
+composer with no knowledge of where its inputs came from, while letting the
+assembler measure `assignment` and `solution` separately for the budget
+arithmetic. The current logic at [run_tutor_chat.rb:50](../app/application/services/tutor_chat/run_tutor_chat.rb#L50)
+moves verbatim into the assembler.
 
 ---
 
@@ -264,8 +299,8 @@ ROLE_OVERHEAD       = 4    # per-message wrapper tokens (matches OpenAI's "every
 
 | Path | Responsibility |
 |---|---|
-| `app/domain/values/token_budget.rb` | Per-model context window table; `TokenBudget.for(model:)`. |
-| `app/domain/values/tokenizer.rb` | `estimate(text)` — char/4 heuristic; one seam, one method. |
+| `app/domain/values/token_budget.rb` | Per-**channel** input/output token budget table; `Values::TokenBudget.for(endpoint:)`. |
+| `app/domain/values/tokenizer.rb` | `Values::Tokenizer.estimate(text)` — `chars / 3.5` heuristic; one seam, one method. Namespace matches existing `app/domain/values/*` files (all use `Tyla::Values::*`). |
 | `app/application/prompts/builders/budget_aware_prompt_assembler.rb` | The algorithm in §4. Returns a struct `{ system_prompt:, history:, dropped: { student_file?, history_turns_dropped } }`. |
 | `spec/domain/values/token_budget_spec.rb` | Table coverage + unknown-model fallback. |
 | `spec/domain/values/tokenizer_spec.rb` | Heuristic boundaries. |
@@ -275,8 +310,11 @@ ROLE_OVERHEAD       = 4    # per-message wrapper tokens (matches OpenAI's "every
 
 | Path | Change |
 |---|---|
-| [app/application/prompts/builders/tutor_system_prompt.rb](../app/application/prompts/builders/tutor_system_prompt.rb) | Delete `truncate_history`. Simplify `format_file` to render full content (no per-file cap). Keep `build` as the pure composer. |
-| [app/application/services/tutor_chat/run_tutor_chat.rb](../app/application/services/tutor_chat/run_tutor_chat.rb#L43-L58) | Replace lines 43–58 with one `BudgetAwarePromptAssembler.call(...)`; pass `model` (already resolved at line 23). |
+| [app/application/prompts/builders/tutor_system_prompt.rb](../app/application/prompts/builders/tutor_system_prompt.rb) | Delete `truncate_history`. Simplify `format_file` to render full content (no per-file cap). Keep `build` as the pure composer — signature unchanged; assembler combines `assignment + solution` before calling. |
+| [app/application/services/tutor_chat/run_tutor_chat.rb](../app/application/services/tutor_chat/run_tutor_chat.rb#L43-L58) | Replace lines 43–58 with one `BudgetAwarePromptAssembler.call(...)`; pass `endpoint` (already resolved at line 24); pass `assembled.max_tokens` into `llm.send_prompt`; map `:context_overflow` Failure. |
+| [app/infrastructure/llm/openai_client.rb](../app/infrastructure/llm/openai_client.rb#L21-L31) | `send_prompt` gains `max_tokens:` keyword; included in JSON body alongside `model`/`messages`. |
+| [app/infrastructure/llm/anthropic_client.rb](../app/infrastructure/llm/anthropic_client.rb) | Same `max_tokens:` plumb-through (Anthropic Messages API requires `max_tokens`; if it was hard-coded before, switch to the passed value). |
+| [config/api.rb](../config/api.rb) | Add `:context_overflow => 413` to the `SERVICE_FAILURE_STATUS` map. |
 | [app/domain/values/payload_limits.rb](../app/domain/values/payload_limits.rb) | Remove `MAX_HISTORY_TURNS` and `MAX_FILE_LINES`. Keep `MAX_CONTEXT_FILES_BYTES` and `MAX_HISTORY_BYTES` — they remain as transport-layer caps (DoS protection), distinct from the LLM token budget. |
 | [spec/domain/values/payload_limits_spec.rb](../spec/domain/values/payload_limits_spec.rb) | Drop the two tests for the deleted constants. |
 | [spec/application/prompts/builders/tutor_system_prompt_spec.rb](../spec/application/prompts/builders/tutor_system_prompt_spec.rb) | Drop `.truncate_history` describe block; drop the `MAX_FILE_LINES` truncation test. |
@@ -375,32 +413,50 @@ Spec: empty/nil → 0; `'a' * 35` → 10; idempotent across calls.
 
 ### Step 2 — TokenBudget value object
 
-Create `app/domain/values/token_budget.rb`. Frozen hash + `for(endpoint:)`
-class method that matches the endpoint against each channel's regex; first
-match wins; missing/nil endpoint falls to `:unknown` (which is set to the
-GitHub Models limits — see §3). Return a small struct with
+Create `app/domain/values/token_budget.rb`. Frozen `CHANNELS` hash (see §3)
++ `Values::TokenBudget.for(endpoint:)` class method that parses the URI,
+compares `host` against each channel's `hosts:` allowlist in declared
+order (GitHub Models first), and falls back to `:unknown` on no match or
+nil/unparseable endpoint. Returns a small struct exposing
 `input_token_limit`, `output_reservation`, and `channel` (for logs).
 
 ### Step 3 — BudgetAwarePromptAssembler
 
 Create `app/application/prompts/builders/budget_aware_prompt_assembler.rb`.
-This is the only file with the algorithm logic. It depends on `Tokenizer`,
-`TokenBudget`, and `TutorSystemPrompt.build`. Return value:
+This is the only file with the algorithm logic. It depends on
+`Values::Tokenizer`, `Values::TokenBudget`, and `Prompts::TutorSystemPrompt.build`.
+Internally it concatenates `"## Assignment\n…\n\n## Reference Solution\n…"`
+into `solution_text` before calling `build` — `build`'s signature is
+unchanged. Return value:
 
 ```ruby
-Result = Struct.new(:system_prompt, :history, :student_file_dropped,
-                    :history_turns_dropped, :overflow?, keyword_init: true)
+Result = Struct.new(:system_prompt, :history, :max_tokens,
+                    :student_file_dropped, :history_turns_dropped, :overflow?,
+                    keyword_init: true)
 ```
 
-`overflow?` is true when persona+assignment+solution+prompt already exceed
-budget. Callers map this to `status: error` with HTTP 502/500.
+- `max_tokens` carries `budget.output_reservation` through to the caller so
+  `RunTutorChat` can pass it to `llm.send_prompt`.
+- `overflow?` is true when persona+assignment+solution+prompt already exceed
+  budget. Callers map this to `Failure[:context_overflow, …]` → **HTTP 413**.
 
 ### Step 4 — Simplify `TutorSystemPrompt`
 
 Delete `truncate_history` and the per-file cap branch inside `format_file`.
 Builder becomes a pure composer with no truncation knowledge.
 
-### Step 5 — Wire into `RunTutorChat`
+### Step 5 — Wire into `RunTutorChat` + LLM clients
+
+**5a. LLM clients accept `max_tokens:`**
+
+- [openai_client.rb:21](../app/infrastructure/llm/openai_client.rb#L21): add
+  `max_tokens:` keyword arg; include in JSON body alongside `model` and
+  `messages`.
+- [anthropic_client.rb](../app/infrastructure/llm/anthropic_client.rb): same.
+  (Anthropic's Messages API already requires `max_tokens`; if a constant is
+  in use, switch to the passed value.)
+
+**5b. `RunTutorChat` calls the assembler and forwards `max_tokens`**
 
 Replace [run_tutor_chat.rb:43-58](../app/application/services/tutor_chat/run_tutor_chat.rb#L43-L58):
 
@@ -421,15 +477,20 @@ return Failure[:context_overflow, 'prompt exceeds model context window'] if asse
 llm_reply = llm.send_prompt(
   system_prompt: assembled.system_prompt,
   user_message:  params[:prompt],
-  history:       assembled.history
+  history:       assembled.history,
+  max_tokens:    assembled.max_tokens
 )
 ```
 
 `endpoint` is already resolved at [run_tutor_chat.rb:24](../app/application/services/tutor_chat/run_tutor_chat.rb#L24)
 (`headers['HTTP_X_LLM_ENDPOINT']`). The assembler internally calls
-`TokenBudget.for(endpoint: endpoint)` so the channel is derived once.
+`Values::TokenBudget.for(endpoint: endpoint)` so the channel is derived once.
 
-Add `:context_overflow` mapping in `api.rb` `SERVICE_FAILURE_STATUS` table.
+**5c. Status mapping**
+
+Add `SERVICE_FAILURE_STATUS[:context_overflow] = 413` in `config/api.rb`.
+413 (Payload Too Large) is the correct semantic — well-formed request, but
+exceeds a size limit. Distinct from 422 (validation) and 502 (upstream).
 
 ### Step 6 — Update specs
 
@@ -441,9 +502,12 @@ Add `:context_overflow` mapping in `api.rb` `SERVICE_FAILURE_STATUS` table.
     `student_file_dropped` is `true` and the student file string is not in
     `system_prompt`.
 - Add edge cases:
-  - Single history turn larger than remaining budget → dropped, others kept.
-  - Unknown model name → fallback budget applied, processing succeeds.
-  - Overflow on items 1–4 → `overflow?` true, no LLM call.
+  - Single history turn larger than remaining budget at position N (newest→oldest walk) → **all turns at position N and older are dropped** (locks the `break` semantics from §4).
+  - Unknown endpoint → fallback channel (`:unknown`, 8 K), processing succeeds.
+  - Overflow on items 1–4 → `overflow?` true, no LLM call, controller returns 413.
+  - `assembled.max_tokens` is forwarded to `llm.send_prompt` (assert with a stubbed client).
+  - `Values::TokenBudget.for(endpoint: 'https://models.inference.ai.azure.com/...')` → `channel == :github_models_free` (our actual deployment).
+  - `Values::TokenBudget.for(endpoint: 'https://api.openai.com/...')` → `channel == :openai_direct` (native-key fall-through).
 
 ---
 
@@ -451,7 +515,8 @@ Add `:context_overflow` mapping in `api.rb` `SERVICE_FAILURE_STATUS` table.
 
 | Risk | Mitigation |
 |---|---|
-| Heuristic under-estimates for code-heavy R/Markdown → LLM rejects with 400. | Conservative `CHARS_PER_TOKEN = 3.5` plus 4 K output reservation gives ~6 % headroom. Calibrate after deploy. **Higher impact on GitHub Models channel** — under an 8 K cap, a 5 % under-estimate is 400 tokens, large enough to push a request over the limit. Consider tightening to 3.2 after one round of calibration. |
+| Heuristic under-estimates for code-heavy R/Markdown → LLM rejects with 400. | Conservative `CHARS_PER_TOKEN = 3.5` plus 4 K output reservation (now actually enforced as `max_tokens` per Step 5a) gives ~6 % headroom. Spot-check post-deploy via temporary `warn`. **Higher impact on GitHub Models channel** — under an 8 K cap, a 5 % under-estimate is 400 tokens, large enough to push a request over the limit. Consider tightening to 3.2 if drift is observed. |
+| Provider rejects our `max_tokens` (e.g. some reasoning models require a higher floor). | 4 K is within published limits for every channel in the table; only impact would be wasted output capacity on Enterprise (8 K available). If a reasoning-model tier is added to the table, set its `output` accordingly. |
 | GitHub Models reasoning-model tiers (o1/o3/gpt-5/DeepSeek-R1/Grok-3) might cap differently from 8 K. | Out of scope for v1; falls back to `:unknown` (8 K) until verified. Add channels when we add support for any of these models. |
 | Endpoint sniffing misclassifies a future GitHub Models proxy URL. | Fallback channel is also 8 K, so misclassification produces conservative behaviour, not a 400. |
 | Deleting the legacy path removes a class someone else was about to wire up. | grep showed zero non-spec callers as of 2026-05-27; before merging Step 0, re-run the grep on `main` and check open PRs for any new reference. |
