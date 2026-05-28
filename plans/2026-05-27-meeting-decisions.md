@@ -3,6 +3,8 @@
 > **Date:** 2026-05-27
 > **Status:** CONFIRMED decisions from professor meeting
 > **Builds on:** `2026-05-21-tutor-chat-api.md`
+> **Last audited:** 2026-05-28 — Issues 1 & 2 are shipped to `main`;
+> Issue 3 has design questions still open (see end of file).
 
 ---
 
@@ -11,9 +13,9 @@
 Following last week's system refactoring (loader migration to infrastructure layer),
 three new topics were resolved in this meeting:
 
-1. API response standardization for `POST /api/v1/tutor_chats`
-2. Backend ownership of LLM input token trimming
-3. TUI visibility of per-request token usage
+1. **Issue 1 — API response standardization** for `POST /api/v1/tutor_chats` — ✅ shipped
+2. **Issue 2 — Backend ownership** of LLM input token trimming — ✅ shipped (via `BudgetAwarePromptAssembler`)
+3. **Issue 3 — TUI visibility** of per-request token usage — ⏳ in design; backend contract ready, TUI work pending; see corrections section below
 
 ---
 
@@ -226,6 +228,17 @@ This is **new functionality**, not a tweak. It deserves its own design doc
 
 ## Issue 3 — TUI Quota Visibility (per-request usage reporting)
 
+### Repo ownership
+
+- **`Tyla-api` (this repo)** — only owns the response contract (the `usage`
+  field shape). Contract work for the `done` / `forbidden` / `unavailable`
+  cases is **already shipped** as part of Issue 1; the remaining backend
+  work depends on the open questions below (guard-token accounting,
+  DB logging).
+- **`MindyCLI_demo/tyla` (sibling repo)** — owns the actual TUI display
+  work (gateway validation, event-mapper forwarding, StatusBar rendering).
+  This is where the bulk of Issue 3 lives.
+
 ### Context
 
 Students are expected to supply their own GitHub Copilot Pro API key
@@ -250,35 +263,92 @@ cost them. This is already present in the `usage` field of the `done` and
 
 ### What the TUI should display
 
-After each tutor reply, show the per-request token usage from the response:
+Update the StatusBar with per-turn token usage from the latest response.
+No per-message line in the chat stream; no cumulative counter; no
+quota-remaining calculation. Format (English, last turn only):
 
 ```
-Tokens used this turn: 4321 input / 512 output
+── model · context · turn 7 · 4321 in / 512 out ──
 ```
 
-No cumulative counter. No quota-remaining calculation.
+The `4321 in / 512 out` figure is the **sum of guard + tutor** tokens for
+that turn (see Q1 below). On a `forbidden` reply, the figure reflects the
+guard call only (tutor was never invoked).
+
+### Important corrections (current vs. plan, 2026-05-28 audit)
+
+1. **The contract for `forbidden` is changing.** Earlier wording said
+   `forbidden` omits `usage`; the current code returns `usage: null` (key
+   present, value null — see
+   [tutor_chat_representer.rb:18](../app/presentation/representers/tutor_chat_representer.rb#L18)
+   and [tutor_chat_representer_spec.rb:29–38](../spec/presentation/representers/tutor_chat_representer_spec.rb#L29-L38)).
+   With Q1 resolved (sum guard + tutor), the new contract is: **every 2xx
+   response carries `usage` with the combined guard+tutor token counts**
+   for that turn. `forbidden` now reports the guard call's tokens (no
+   longer null). Only `error` (non-2xx) responses lack the field.
+
+2. **Guard tokens are currently dropped silently.** `GuardAgent.check`
+   returns a `GuardResult` carrying only `probability` and `reason`
+   ([guard_result.rb](../app/domain/values/guard_result.rb)). To honour
+   Q1 the value object and the agent need a `usage` field; `RunTutorChat`
+   then sums it with `llm_reply.usage` before populating the DTO.
+
+3. **No DB record of token usage** — and per Q2, that stays so.
+   Token counts are request-scoped only.
+
+4. **No runtime validation on the TUI side.** The gateway
+   (`MindyCLI_demo/tyla/src/infrastructure/api/tutor/tutor-chat-gateway.ts`,
+   lines 93–96) does `data.usage?.input_tokens ?? 0` with no integer / range
+   check. A bug or hostile backend could surface `NaN`, negative, or
+   absurdly large numbers in the UI. Trivial to fix; flagging for the
+   security audit.
 
 ### TODO (Issue 3)
 
-- [ ] Confirm `usage` is included in both `done` and `unavailable` response shapes ✓ (see Issue 1)
-- [ ] TUI (client) reads `usage.input_tokens` and `usage.output_tokens` and
-      displays them after each reply
-- [ ] `forbidden` and `error` responses omit `usage` — TUI must handle the
-      missing field gracefully (no crash, no display)
+**Backend (`Tyla-api`) — implement guard-token aggregation (Q1):**
+
+- [x] Confirm `usage` is included in both `done` and `unavailable` response shapes (verified, see Issue 1)
+- [ ] Extend `LlmResponse` parsing so guard calls also capture usage (currently `GuardAgent` discards it)
+- [ ] Add `usage` field to `Domain::Values::GuardResult` (nullable — `nil` when guard was unreachable)
+- [ ] In `RunTutorChat`: sum `guard_result.usage` and `llm_reply.usage` (handling each side being nil) before building `Response::TutorChat`; on the `forbidden` branch pass through the guard-only sum instead of `nil`
+- [ ] Update `doc/api_tutor_chats.md`: replace the "`forbidden` returns `usage: null`" example with the new combined-usage shape; document that `usage` reflects guard+tutor sum
+- [ ] Specs: `RunTutorChat` returns combined usage on `done`; returns guard-only usage on `forbidden`; returns tutor-only usage on `unavailable` (guard usage unknown)
+- [ ] Representer spec: `usage` is no longer null on the `forbidden` DTO; drop the `render_nil` test case for `forbidden` and add a positive case
+
+**TUI (`MindyCLI_demo/tyla`) — StatusBar wiring (Q3, Q4, Q5):**
+
+- [ ] `tutor-chat-gateway.ts`: drop the special-case that omits `usage` on `forbidden` (now always present on 2xx); add runtime validation — input/output counts must be non-negative integers under a sane upper bound (e.g. 10⁶); on invalid, display `—`
+- [ ] `agent-service.ts`: forward `usage.inputTokens` / `usage.outputTokens` through the `turn_saved` event payload (currently dropped at the mapper boundary)
+- [ ] `shared/view-models/index.ts`: add `lastInputTokens?: number` / `lastOutputTokens?: number` to `StatusBarVM`; add `'tokens'` to `StatusBarItemKey`; *(Q5)* remove `'cost'` from the default `StatusBarDisplayConfig` items
+- [ ] `event-mapper.ts`: populate the new VM fields from `turn_saved`; do NOT emit a per-message chat-stream line
+- [ ] `StatusBar.tsx`: add a `tokens` renderer rendering `{lastInputTokens} in / {lastOutputTokens} out`; render `—` when either field is undefined or failed validation
+- [ ] `App.tsx`: update `DEFAULT_STATUS_CONFIG` items list — replace `'cost'` with `'tokens'`
+- [ ] *(optional, Q5 tentative)* `agent-service.ts`: stop maintaining `session.totalCostUSD` if no consumer remains (keep the field if other code paths still read it)
+- [ ] Specs: gateway validation rejects null/negative/non-integer; event-mapper surfaces tokens on every 2xx turn; StatusBar renders `—` when fields are missing
 
 ---
 
 ## Cross-cutting changes required
 
-| File | Change | Status |
-|---|---|---|
-| `app/presentation/representers/tutor_chat_representer.rb` | **CREATE** — extract from inline `build_*_response`; emit `status` field | new |
-| `app/application/services/tutor_chat/run_tutor_chat.rb` | Change `:unauthorized` → `:forbidden`; drop inline response builders | edit |
-| `app/application/controllers/api.rb` | Add `:forbidden` to `SERVICE_FAILURE_STATUS` table | edit |
-| `app/application/prompts/builders/tutor_system_prompt.rb` | Replace fixed-cutoff trimming with budget-aware logic | edit (depends on sub-plan) |
-| `app/domain/values/token_budget.rb` | **CREATE** — per-model context window value object | new |
-| `app/application/prompts/history_trimmer.rb` | **CREATE** — newest-first budget-aware history filter | new |
-| `doc/api_tutor_chats.md` | Update response contract docs | edit |
+> **Status as of 2026-05-28 audit.** Issues 1 and 2 are already shipped to
+> `main`; the table below records the final outcome (some items diverged
+> from the original sketch — notably no standalone `history_trimmer.rb`).
+
+| File | Change | Status | Commit |
+|---|---|---|---|
+| `app/presentation/representers/tutor_chat_representer.rb` | Extract from inline `build_*_response`; emit `status` field; render `usage` with `render_nil: true` | ✅ DONE | `c748d98`, `cf5698f` |
+| `app/application/services/tutor_chat/run_tutor_chat.rb` | Change `:unauthorized` → `:forbidden`; replace inline builders with DTO | ✅ DONE | `1e580c7`, `cf5698f` |
+| `app/application/controllers/api.rb` | Add `:forbidden` to `SERVICE_FAILURE_STATUS` table | ✅ DONE | `1e580c7` |
+| `app/application/prompts/builders/tutor_system_prompt.rb` | Removed — superseded by `BudgetAwarePromptAssembler` | ✅ DONE (replaced) | `b23148f` |
+| `app/application/prompts/builders/budget_aware_prompt_assembler.rb` | **NEW** — unified persona+assignment+solution+student+history assembler with budget enforcement (replaces the planned `history_trimmer.rb` split) | ✅ DONE | `b23148f` |
+| `app/domain/values/token_budget.rb` | Per-model context window value object | ✅ DONE | `b23148f` |
+| `app/domain/values/tokenizer.rb` | Char-count tokenizer (per sub-plan) | ✅ DONE | `b23148f` |
+| `doc/api_tutor_chats.md` | Update response contract docs | ✅ DONE | `90359fc` |
+| `doc/api_tutor_chats.md` | Issue-3 rewrite: document combined guard+tutor `usage` on every 2xx, including `forbidden` | ⏳ TODO | — |
+| `app/domain/values/guard_result.rb` | Add `usage` field (nullable) carrying guard-call token counts | ⏳ TODO (Q1) | — |
+| `app/application/services/guard/guard_agent.rb` | Capture and return `LlmResponse#usage` on the guard call (currently dropped) | ⏳ TODO (Q1) | — |
+| `app/application/services/tutor_chat/run_tutor_chat.rb` | Sum guard + tutor usage; pass through on all 2xx branches including `forbidden` | ⏳ TODO (Q1) | — |
+| `spec/presentation/representers/tutor_chat_representer_spec.rb` | Update `forbidden` case — `usage` is no longer null | ⏳ TODO (Q1) | — |
 
 > `app/domain/policy/attack_policy.rb` is **not** in this list — verified
 > already centralized, no change needed.
@@ -287,23 +357,90 @@ No cumulative counter. No quota-remaining calculation.
 
 ## Implementation order
 
-Ship in this order to minimize cross-PR coupling:
+Original plan was Issue 1 → 3 → 2. As of 2026-05-28, **Issues 1 and 2 are
+already merged** and the previously-blocking design questions (Q1–Q5) are
+resolved. Recommended order for Issue 3 work:
 
-1. **Issue 1 (API response shape)** — small, self-contained, unblocks the TUI.
-2. **Issue 3 (TUI usage display)** — pure client work, depends only on Issue 1.
-3. **Issue 2 (token-budget trimming)** — largest scope; gated on the
-   tokenizer-choice sub-plan. Do this last so the API contract is stable
-   before the trimmer changes the prompt assembly.
+1. **Backend — guard-token aggregation (Q1).** This changes the API
+   contract (`forbidden` will start returning a non-null `usage`), so it
+   has to land before the TUI ships against the new shape.
+   - `GuardResult` gets `usage` field
+   - `GuardAgent` captures `LlmResponse#usage`
+   - `RunTutorChat` sums guard + tutor
+   - Specs + representer specs updated
+2. **Backend — doc rewrite.** Update `doc/api_tutor_chats.md` once the new
+   contract is in.
+3. **TUI — gateway hardening.** Drop the `forbidden`-special-case and add
+   runtime validation against the new always-present `usage` shape.
+4. **TUI — StatusBar wiring.** Forward usage through `agent-service.ts` →
+   `event-mapper.ts` → `StatusBarVM` → `StatusBar.tsx`; remove `cost` from
+   default items (Q5).
+5. **TUI — specs.** Validation, mapper, renderer.
+
+> **Coordination risk:** between step 1 and step 3, the TUI in production
+> may temporarily see a non-null `usage` on `forbidden` while still ignoring
+> it. That's harmless (just an unused field). The reverse ordering would
+> not be — TUI hardening before contract change would assume a `null` that
+> the backend stopped sending.
+
+---
+
+## Resolved decisions (2026-05-28)
+
+Q1–Q5 from the previous draft were resolved by the project owner.
+Q6–Q7 remain open and carry to the next meeting.
+
+### Q1 — Guard-stage tokens: **summed into a single `usage`**
+
+**Decision:** option (A) — guard + tutor tokens are summed by the backend
+and returned as a single `usage` object. No split, no extra fields for
+the student.
+
+**Implications:**
+- `GuardAgent.check` / `GuardResult` must surface the guard call's token
+  usage (currently dropped — `guard_result.probability` and `.reason` only).
+- `RunTutorChat` adds `guard_usage + tutor_usage` before building the DTO.
+- **`forbidden` response no longer returns `usage: null`** — it returns
+  `usage: { input_tokens: G_in, output_tokens: G_out }` reflecting the
+  guard call. Only `error` (non-200) responses lack `usage`.
+- `unavailable` (guard failed) → guard usage is unknown; report tutor only.
+- The doc text saying "`forbidden` returns `usage: null`" must be removed
+  (this overrides the earlier wording fix; now `usage` is always present
+  on a 2xx response).
+
+### Q2 — DB token logging: **no**
+
+**Decision:** do NOT add `input_tokens` / `output_tokens` to `prompt_logs`.
+Token usage stays request-scoped only; no historical record on the server.
+
+### Q3 — UI placement: **StatusBar only**
+
+**Decision:** display per-turn tokens in the StatusBar (last turn only,
+no per-message line in the chat stream).
+
+### Q4 — Display language: **English**
+
+**Decision:** keep the existing English UI vocabulary. No i18n layer
+needed for this scope.
+
+### Q5 — Cumulative USD cost display: **remove** *(tentative)*
+
+**Decision:** remove `totalCostUSD` from the default StatusBar items.
+In backend-gateway mode the cost estimate is unreliable (we don't know
+the per-token rate the student's key incurs).
+
+> Marked tentative — original answer had a question mark. Re-confirm if
+> this is mistaken before TUI work begins.
 
 ---
 
 ## Open questions (carry to next meeting)
 
-1. **`/guard_checks` alignment** — does that endpoint also need to move from
-   `allowed: bool` to a `status` string? Or keep it separate since it's a
-   different client interaction? (Interim: TUI sees two shapes.)
-2. **Tokenizer choice** — moved to the Issue 2 sub-plan; this is now a
-   **blocker** for Issue 2, not just an open question.
-3. **`forbidden` content source** — is the Socratic redirect message hardcoded
-   (current: `Values::RefusalTemplates.for`), templated per assignment, or
-   generated by a small LLM call?
+1. **`/guard_checks` alignment** *(carry-over)* — does that endpoint also
+   need to move from `allowed: bool` to a `status` string? Or keep it
+   separate since it's a different client interaction? (Interim: TUI sees
+   two shapes.)
+2. **`forbidden` content source** *(carry-over)* — is the Socratic redirect
+   message hardcoded (current: `Infrastructure::Filesystem::RefusalLoader`,
+   reads `## Refusal Message` section of `TUTOR.md`), templated per
+   assignment, or generated by a small LLM call?
