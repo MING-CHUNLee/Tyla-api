@@ -14,11 +14,6 @@ module Tyla
         def self.load(_project_id)
           File.read(FIXTURE_PATH)
         end
-
-        # Retained for TutorOrchestrator, which predates the per-project loader.
-        def self.load_stub
-          ''
-        end
       end
     end
   end

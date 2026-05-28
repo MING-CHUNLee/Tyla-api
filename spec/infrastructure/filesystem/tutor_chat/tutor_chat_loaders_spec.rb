@@ -41,10 +41,6 @@ module Tyla
           _(text).must_include "Let's redirect"
         end
 
-        it 'SolutionLoader still answers .load_stub for the legacy orchestrator' do
-          _(SolutionLoader.load_stub).must_equal ''
-        end
-
         it 'all five loaders ignore project_id in Phase 1' do
           _(AssignmentLoader.load('anything')).wont_be_empty
           _(SolutionLoader.load('anything')).wont_be_empty

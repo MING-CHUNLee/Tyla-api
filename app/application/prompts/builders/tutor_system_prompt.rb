@@ -2,6 +2,9 @@
 
 module Tyla
   module Prompts
+    # Pure composer: glues policy + solution + context-file blocks into one
+    # system prompt string. Trimming (history truncation, student-file drop)
+    # is the assembler's job, not this builder's.
     module TutorSystemPrompt
       def self.build(policy_text:, solution_text:, context_files:)
         parts = [policy_text]
@@ -15,21 +18,10 @@ module Tyla
         parts.join("\n\n---\n\n")
       end
 
-      def self.truncate_history(history)
-        return [] if history.nil?
-
-        max_messages = Values::PayloadLimits::MAX_HISTORY_TURNS * 2
-        history.last(max_messages)
-      end
-
       def self.format_file(file)
-        path    = file[:path] || file['path']
+        path    = file[:path]    || file['path']
         content = file[:content] || file['content'] || ''
-        lines = content.lines
-        limit = Values::PayloadLimits::MAX_FILE_LINES
-        body  = lines.first(limit).join
-        body += "\n# ... (truncated, showing first #{limit} lines)\n" if lines.size > limit
-        "### #{path}\n```\n#{body}\n```"
+        "### #{path}\n```\n#{content}\n```"
       end
       private_class_method :format_file
     end

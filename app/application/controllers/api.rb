@@ -6,14 +6,15 @@ module Tyla
     # envelope expects. Keep this table in one place so route handlers do
     # not pattern-match raw tags inline.
     SERVICE_FAILURE_STATUS = {
-      bad_request:      :bad_request,
-      unauthorized:     :unauthorized,
-      forbidden:        :forbidden,
-      not_found:        :not_found,
-      cannot_process:   :cannot_process,
-      upstream_error:   :upstream_error,
-      upstream_timeout: :upstream_timeout,
-      db_error:         :internal_error
+      bad_request:       :bad_request,
+      unauthorized:      :unauthorized,
+      forbidden:         :forbidden,
+      not_found:         :not_found,
+      context_overflow:  :payload_too_large,
+      cannot_process:    :cannot_process,
+      upstream_error:    :upstream_error,
+      upstream_timeout:  :upstream_timeout,
+      db_error:          :internal_error
     }.freeze
 
     route do |r|

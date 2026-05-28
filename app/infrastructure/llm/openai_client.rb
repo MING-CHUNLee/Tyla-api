@@ -18,15 +18,16 @@ module Tyla
         @endpoint = URI(endpoint || ENV.fetch('OPENAI_API_BASE', DEFAULT_ENDPOINT))
       end
 
-      def send_prompt(system_prompt:, user_message:, history: [])
+      def send_prompt(system_prompt:, user_message:, history: [], max_tokens: nil)
         messages = [{ role: 'system', content: system_prompt }]
         Array(history).each do |m|
           messages << { role: m[:role] || m['role'], content: m[:content] || m['content'] }
         end
         messages << { role: 'user', content: user_message }
 
-        body = { model: @model, messages: messages }.to_json
-        response = post_json(body)
+        payload = { model: @model, messages: messages }
+        payload[:max_tokens] = max_tokens unless max_tokens.nil?
+        response = post_json(payload.to_json)
         parse(response)
       end
 

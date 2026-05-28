@@ -40,21 +40,24 @@ module Tyla
           return Success([:forbidden, build_forbidden_response(log.id, params[:project_id])])
         end
 
-        assignment = Infrastructure::Filesystem::AssignmentLoader.load(params[:project_id])
-        solution   = Infrastructure::Filesystem::SolutionLoader.load(params[:project_id])
-        student    = Infrastructure::Filesystem::StudentFileLoader.load(params[:project_id])
-        persona    = Infrastructure::Filesystem::TutorPersonaLoader.load(params[:project_id])
-
-        system_prompt = Prompts::TutorSystemPrompt.build(
-          policy_text:   persona,
-          solution_text: "## Assignment\n#{assignment}\n\n## Reference Solution\n#{solution}",
-          context_files: [{ path: Infrastructure::Filesystem::StudentFileLoader::FILENAME, content: student }]
+        assembled = Prompts::BudgetAwarePromptAssembler.call(
+          persona:      Infrastructure::Filesystem::TutorPersonaLoader.load(params[:project_id]),
+          assignment:   Infrastructure::Filesystem::AssignmentLoader.load(params[:project_id]),
+          solution:     Infrastructure::Filesystem::SolutionLoader.load(params[:project_id]),
+          student_file: { path:    Infrastructure::Filesystem::StudentFileLoader::FILENAME,
+                          content: Infrastructure::Filesystem::StudentFileLoader.load(params[:project_id]) },
+          history:      params[:history],
+          user_prompt:  params[:prompt],
+          endpoint:     endpoint
         )
-        history   = Prompts::TutorSystemPrompt.truncate_history(params[:history])
+
+        return Failure[:context_overflow, 'prompt exceeds model context window'] if assembled.overflow?
+
         llm_reply = llm.send_prompt(
-          system_prompt: system_prompt,
+          system_prompt: assembled.system_prompt,
           user_message:  params[:prompt],
-          history:       history
+          history:       assembled.history,
+          max_tokens:    assembled.max_tokens
         )
 
         response = build_ok_response(log.id, llm_reply, llm_unavailable: llm_unavailable)

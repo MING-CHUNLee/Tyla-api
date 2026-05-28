@@ -67,7 +67,7 @@ POST /api/v1/tutor_chats
 | `project_id` | string | Required | Project identifier, e.g. `"HW2"`. Phase 1: any value resolves to the bundled `CSDS-HW2` fixture. |
 | `student_id` | string | Required | Student identifier |
 | `prompt` | string | Required | The student's message |
-| `history` | array | Optional | Prior chat turns, in order. Each entry is `{ "role": "user" \| "assistant", "content": "..." }`. Capped at 500 KB; older turns beyond `MAX_HISTORY_TURNS` are truncated server-side. |
+| `history` | array | Optional | Prior chat turns, in order. Each entry is `{ "role": "user" \| "assistant", "content": "..." }`. Capped at 500 KB at the transport layer. The backend then runs a token-budget trim (newest-first) so the assembled prompt fits the LLM channel's input window; oldest turns are silently dropped if needed. |
 
 ### Example Request
 
@@ -214,7 +214,8 @@ in this order via `Prompts::TutorSystemPrompt.build`:
 ## Student Workspace Files
 ### Hw2.Rmd
 ```
-{student's WIP, truncated at MAX_FILE_LINES if long}
+{student's WIP — included in full when it fits the remaining
+token budget, dropped entirely when it does not}
 ```
 ```
 

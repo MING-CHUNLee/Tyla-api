@@ -8,7 +8,7 @@ module Tyla
 
     FAILURE = Set.new(
       %i[bad_request unauthorized forbidden not_found conflict
-         cannot_process internal_error upstream_error upstream_timeout]
+         payload_too_large cannot_process internal_error upstream_error upstream_timeout]
     ).freeze
 
     CODES = SUCCESS | FAILURE

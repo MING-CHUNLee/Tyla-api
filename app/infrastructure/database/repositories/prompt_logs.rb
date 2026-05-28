@@ -18,9 +18,6 @@ module Tyla
         end
 
         # Update an existing row by id with the given attributes (partial update).
-        # Used by the pending-row workflow in HandleTutorChat: a pending row is
-        # created with nil attack_probability / evaluation, then back-filled
-        # here once the orchestrator returns.
         def update(id, attrs)
           row = Database::PromptLogOrm[id]
           return nil if row.nil?

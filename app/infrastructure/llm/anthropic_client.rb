@@ -19,7 +19,7 @@ module Tyla
         @model   = model
       end
 
-      def send_prompt(system_prompt:, user_message:, history: [])
+      def send_prompt(system_prompt:, user_message:, history: [], max_tokens: nil)
         messages = Array(history).map do |m|
           { role: m[:role] || m['role'], content: m[:content] || m['content'] }
         end
@@ -27,7 +27,7 @@ module Tyla
 
         body = {
           model:      @model,
-          max_tokens: DEFAULT_MAX_TOKENS,
+          max_tokens: max_tokens || DEFAULT_MAX_TOKENS,
           system:     system_prompt,
           messages:   messages
         }.to_json

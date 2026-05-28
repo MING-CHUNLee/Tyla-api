@@ -43,9 +43,9 @@ A repository for `Entity::Foo` should expose, at minimum:
 | `rebuild_entity(db_resource)`  | ORM row or nil | `Entity::Foo` or nil | shared funnel used by all the above |
 
 Additional methods are added as workflows demand — for example
-`Repository::PromptLogs.update(id, attrs)` exists for the pending-row
-back-fill in `HandleTutorChat`. New methods must still take / return entities
-(or primitives like `id`), never raw ORM rows.
+`Repository::PromptLogs.update(id, attrs)` exists for partial updates by id.
+New methods must still take / return entities (or primitives like `id`),
+never raw ORM rows.
 
 ## Rules
 

@@ -190,24 +190,23 @@ failure tags become `Response::Result` statuses
 
 ```
 services/
-├── create_prompt_log.rb   ← Normalises params, validates via contract, persists — POST handler
-├── guard_agent.rb         ← Wraps an LLM call that classifies a prompt as attack vs. benign
-├── handle_tutor_chat.rb   ← Orchestrates a tutor turn end-to-end (rate limit → pending row → LLM → backfill)
-├── list_prompt_logs.rb    ← Lists prompt logs scoped to (student_id, course_id, project_id)
-├── policy_loader.rb       ← Loads the tutor policy MD by mode name (lives in tutor_chat/)
-├── rate_limiter.rb        ← In-memory per-student token bucket (Result-returning `check!`)
-├── solution_loader.rb     ← Loads reference solutions for a project
-├── tutor_chat_input.rb    ← Value object — coerces raw request hash into a typed input
-├── tutor_chat_result.rb   ← Value object — the orchestrator's typed output
-└── tutor_orchestrator.rb  ← Builds the prompt, calls the LLM via guard, returns a TutorChatResult
+├── create_prompt_log.rb        ← Normalises params, validates via contract, persists — POST handler
+├── list_prompt_logs.rb         ← Lists prompt logs scoped to (student_id, course_id, project_id)
+├── guard/
+│   ├── guard_agent.rb          ← Wraps an LLM call that classifies a prompt as attack vs. benign
+│   └── run_guard_check.rb      ← Endpoint service for POST /api/v1/guard_checks
+└── tutor_chat/
+    └── run_tutor_chat.rb       ← Endpoint service for POST /api/v1/tutor_chats — re-runs guard
+                                  server-side, composes the tutor prompt, calls the tutor LLM
 ```
 
 Canonical examples to read first:
 - [`list_prompt_logs.rb`](./list_prompt_logs.rb) — minimal two-step service: validate, then DB call
 - [`create_prompt_log.rb`](./create_prompt_log.rb) — three-step service with param normalisation,
   contract validation (carrying an `errors` hash in the failure tuple), and DB persist
-- [`handle_tutor_chat.rb`](./handle_tutor_chat.rb) — multi-step orchestration with rate limiting,
-  pending-row pattern, structured logging, and tagged failures
+- [`tutor_chat/run_tutor_chat.rb`](./tutor_chat/run_tutor_chat.rb) — multi-step orchestration:
+  re-runs the guard server-side, composes the tutor prompt from on-disk artefacts, and forwards
+  to the tutor LLM with tagged failures (`:upstream_timeout`, `:upstream_error`, …)
 
 Services can be **directly integration-tested** independent of
 controllers — they are plain classes with a `call` method that take
