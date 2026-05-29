@@ -116,12 +116,14 @@ The guard allowed the prompt and the tutor LLM returned a reply.
 }
 ```
 
+`usage` is the **sum of guard-LLM + tutor-LLM** token counts for this turn.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `log_id` | integer | Database ID of this turn's `prompt_logs` row |
 | `status` | string | One of `"done"`, `"forbidden"`, `"unavailable"` |
 | `content` | string | The tutor LLM's reply (or Socratic refusal text on `forbidden`) |
-| `usage` | object \| null | Token counts from the tutor LLM. `null` on `forbidden` (LLM not called). |
+| `usage` | object | Combined token counts for this turn: guard + tutor on `done` / `unavailable`; guard-only on `forbidden`. Always present on 2xx responses. |
 
 `attack_probability` and `evaluation` are still persisted in `prompt_logs`
 and are available via `GET /api/v1/prompt_logs`; they are no longer emitted
@@ -140,9 +142,11 @@ tutor's `TUTOR.md` (`## Refusal Message` section).
   "log_id":  102,
   "status":  "forbidden",
   "content": "Let's redirect. Instead of asking for the answer, what step would you take first to approach this problem?",
-  "usage":   null
+  "usage":   { "input_tokens": 80, "output_tokens": 12 }
 }
 ```
+
+`usage` reflects **guard-LLM tokens only** — the tutor LLM is never called on this path.
 
 > **Frontend behaviour:** When `status` is `"forbidden"`, display `content`
 > to the student. Don't retry the same prompt against `/tutor_chats`.
@@ -164,6 +168,8 @@ string is emitted.
   "usage":   { "input_tokens": 4100, "output_tokens": 480 }
 }
 ```
+
+`usage` reflects tutor tokens only when the guard call fails before the LLM responds (network error). If the guard LLM did respond but the verdict JSON was malformed, guard tokens are included in the sum. When both guard and tutor usage are unknown, `usage` is `{ "input_tokens": 0, "output_tokens": 0 }`.
 
 ---
 

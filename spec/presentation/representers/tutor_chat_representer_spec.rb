@@ -26,15 +26,15 @@ describe Tyla::Representer::TutorChat do
       _(payload['usage'][:input_tokens]).must_equal 10
     end
 
-    it 'keeps the usage key present (value null) on a forbidden DTO' do
+    it 'emits a non-null usage on a forbidden DTO (guard-only tokens)' do
       dto = build_dto(
         status:  'forbidden',
         content: "Let's redirect...",
-        usage:   nil
+        usage:   { input_tokens: 80, output_tokens: 12 }
       )
       payload = Tyla::Representer::TutorChat.new(dto).to_hash
       _(payload).must_include 'usage'
-      _(payload['usage']).must_be_nil
+      _(payload['usage'][:input_tokens]).must_equal 80
     end
 
     it 'accepts the unavailable status' do
@@ -51,12 +51,12 @@ describe Tyla::Representer::TutorChat do
       _(parsed['status']).must_equal 'done'
     end
 
-    it 'serializes a nil usage as JSON null (key present)' do
-      dto    = build_dto(status: 'forbidden', usage: nil)
+    it 'serializes a forbidden DTO usage as a JSON object (not null)' do
+      dto    = build_dto(status: 'forbidden', usage: { input_tokens: 80, output_tokens: 12 })
       json   = Tyla::Representer::TutorChat.new(dto).to_json
       parsed = JSON.parse(json)
       _(parsed).must_include 'usage'
-      _(parsed['usage']).must_be_nil
+      _(parsed['usage']).wont_be_nil
     end
   end
 end

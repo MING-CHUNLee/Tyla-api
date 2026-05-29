@@ -1,7 +1,7 @@
 # Plan — Issue 3 (Backend slice): Guard-Token Aggregation in `usage` Field
 
 > **Date:** 2026-05-28
-> **Status:** DRAFT v1 — open discussion items in §3, ready to execute once resolved
+> **Status:** EXECUTED 2026-05-29 — all §8 checklist items complete; 4 pre-existing CreatePromptLog failures on main are unrelated
 > **Parent decision:** [`2026-05-27-meeting-decisions.md`](./2026-05-27-meeting-decisions.md) §Issue 3
 > **Scope (this PR):** Only the `Tyla-api` repo. The TUI work (`MindyCLI_demo/tyla` — gateway validation, event-mapper, `StatusBar.tsx`) is tracked separately and is **out of scope** for this plan.
 > **Builds on:** Issue 1 (`status` field, representer, `usage` key on every 2xx body) — already shipped on `main`.
@@ -155,6 +155,18 @@ end
 
 **(b) `build_ok_response` — fold guard usage in:**
 
+Also update the **call site** at line 63 (currently omits `guard_result`):
+
+```ruby
+# Before (line 63):
+response = build_ok_response(log.id, llm_reply, llm_unavailable: llm_unavailable)
+
+# After:
+response = build_ok_response(log.id, llm_reply, guard_result, llm_unavailable: llm_unavailable)
+```
+
+Updated method signature and body:
+
 ```ruby
 response = build_ok_response(log.id, llm_reply, guard_result, llm_unavailable: llm_unavailable)
 …
@@ -253,7 +265,7 @@ Out of scope — adding `:usage` to `GuardResult` is enough for this PR. Calling
 |---|------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|------------------|
 | 1 | [`app/domain/values/guard_result.rb`](../app/domain/values/guard_result.rb)                    | Add `usage` attr + ctor kwarg                                                                                       | 5-21              |
 | 2 | [`app/application/services/guard/guard_agent.rb`](../app/application/services/guard/guard_agent.rb) | Split rescues; pass `response.usage` into the happy and JSON-parse-fail paths                                       | 12-28             |
-| 3 | [`app/application/services/tutor_chat/run_tutor_chat.rb`](../app/application/services/tutor_chat/run_tutor_chat.rb) | `build_forbidden_response` takes guard usage; `build_ok_response` takes `guard_result` and sums; private `usage_sum` helper | 39-40, 91-107 |
+| 3 | [`app/application/services/tutor_chat/run_tutor_chat.rb`](../app/application/services/tutor_chat/run_tutor_chat.rb) | `build_forbidden_response` takes guard usage; **update call site at L63** to pass `guard_result`; `build_ok_response` takes `guard_result` and sums; private `usage_sum` helper | 39-40, 63, 91-107 |
 | 4 | [`doc/api_tutor_chats.md`](../doc/api_tutor_chats.md)                                          | Update `usage` field-table row, `done`/`forbidden`/`unavailable` examples + one note paragraph                       | 108-166           |
 | 5 | [`spec/application/services/guard_agent_spec.rb`](../spec/application/services/guard_agent_spec.rb) | New cases: usage propagated on success; usage propagated on JSON-parse failure; usage nil on network failure         | append            |
 | 6 | [`spec/application/services/run_tutor_chat_spec.rb`](../spec/application/services/run_tutor_chat_spec.rb) | Update `done` assertion (sum); update `forbidden` assertion (guard-only, no longer nil); update `unavailable` assertion (Option A behaviour) | 120-163 |
@@ -331,13 +343,29 @@ it 'unavailable path: dto.usage sums guard + tutor when the guard LLM responded 
 end
 
 it 'unavailable path: dto.usage reflects tutor only when the guard call itself raised' do
-  # Need a new helper: guard call raises before producing LlmResponse
   client  = raising_guard_then_tutor
   outcome = call_with(llm_client: client)
   _, dto  = outcome.value!
   _(dto.usage[:input_tokens]).must_equal 10    # tutor only; guard usage nil
 end
 ```
+
+`raising_guard_then_tutor` helper implementation (add alongside `scripted_llm` in the spec):
+
+```ruby
+def raising_guard_then_tutor(tutor_usage: { input_tokens: 10, output_tokens: 5 })
+  call_count = 0
+  client = Object.new
+  client.define_singleton_method(:send_prompt) do |**_kwargs|
+    call_count += 1
+    raise RuntimeError, 'connection refused' if call_count == 1
+    Infrastructure::LlmResponse.new(content: 'tutor reply', usage: tutor_usage)
+  end
+  client
+end
+```
+
+Semantics: first `send_prompt` (guard call) raises before returning any `LlmResponse` — the outer rescue in `GuardAgent#check` catches it, returns `GuardResult` with `usage: nil`. Second call (tutor) succeeds normally.
 
 ### 5.3 `tutor_chat_representer_spec.rb` — flip the forbidden case
 
@@ -369,7 +397,7 @@ Run `bundle exec rerun rackup` and POST the existing dev fixture; eyeball the `u
 
 - **Cost-double-counting concern:** None. Guard and tutor are two physical LLM calls; the sum is the actual cost.
 
-- **Spec brittleness:** The change to `scripted_llm`'s default `guard_usage` is the main risk — any other test that relied on the implicit `{}` will need a sweep. Grep `scripted_llm` before final PR.
+- **Spec brittleness:** The change to `scripted_llm`'s default `guard_usage` is the main risk — any other test that relied on the implicit `{}` will need a sweep. Grep **both `scripted_llm` and `raising_after_guard`** before final PR — `raising_after_guard` (line 75-91 in `run_tutor_chat_spec.rb`) also hard-codes `usage: {}` for the guard call and will need the same treatment if any test asserts on `usage` via that helper.
 
 ---
 
