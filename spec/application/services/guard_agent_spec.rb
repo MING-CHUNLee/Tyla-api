@@ -17,6 +17,14 @@ module Tyla
         client
       end
 
+      def stub_llm_with_usage(content, usage)
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          Infrastructure::LlmResponse.new(content: content, usage: usage)
+        end
+        client
+      end
+
       def raising_llm(error_class, message = 'network error')
         client = Object.new
         client.define_singleton_method(:send_prompt) do |**_kwargs|
@@ -77,6 +85,26 @@ module Tyla
         agent = GuardAgent.new(llm_client: stub_llm('not-json'))
         result = agent.check(prompt: 'hello', mode: 'tutor-socratic')
         _(result.allowed?).must_equal true
+      end
+
+      it 'propagates usage from the guard LLM on the happy path' do
+        content = { 'attack-probability' => 0.1, 'evaluation' => 'ok' }.to_json
+        agent   = GuardAgent.new(llm_client: stub_llm_with_usage(content, { input_tokens: 80, output_tokens: 12 }))
+        result  = agent.check(prompt: 'hi', mode: nil)
+        _(result.usage).must_equal(input_tokens: 80, output_tokens: 12)
+      end
+
+      it 'preserves usage when the verdict JSON is malformed' do
+        agent  = GuardAgent.new(llm_client: stub_llm_with_usage('not-json', { input_tokens: 60, output_tokens: 4 }))
+        result = agent.check(prompt: 'hi', mode: nil)
+        _(result.allowed?).must_equal true
+        _(result.usage).must_equal(input_tokens: 60, output_tokens: 4)
+      end
+
+      it 'returns nil usage when the guard LLM call itself raises' do
+        agent  = GuardAgent.new(llm_client: raising_llm(RuntimeError, 'connection refused'))
+        result = agent.check(prompt: 'hi', mode: nil)
+        _(result.usage).must_be_nil
       end
 
       it 'does not set refusal_instruction on GuardResult (refusal is in RefusalTemplates)' do

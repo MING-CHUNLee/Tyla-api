@@ -10,18 +10,29 @@ module Tyla
       # Returns Values::GuardResult.
       # Fail-open when judge is unavailable; hard-block when attack >= THRESHOLD.
       def check(prompt:, mode:)
-        response    = @llm.send_prompt(
+        response = @llm.send_prompt(
           system_prompt: Prompts::JudgeSystemPrompt.build,
           user_message:  prompt
         )
-        parsed      = JSON.parse(response.content)
-        attack_prob = Float(parsed.fetch('attack-probability'))
-        evaluation  = parsed.fetch('evaluation')
 
-        Values::GuardResult.new(
-          reason:      evaluation,
-          probability: { attack: attack_prob }
-        )
+        begin
+          parsed      = JSON.parse(response.content)
+          attack_prob = Float(parsed.fetch('attack-probability'))
+          evaluation  = parsed.fetch('evaluation')
+
+          Values::GuardResult.new(
+            reason:      evaluation,
+            probability: { attack: attack_prob },
+            usage:       response.usage
+          )
+        rescue StandardError => e
+          warn "[GuardAgent] judge reply unparseable (#{e.class}): #{e.message}"
+          Values::GuardResult.new(
+            allowed: true,
+            reason:  "llm-judge unavailable: #{e.class}",
+            usage:   response.usage
+          )
+        end
       rescue StandardError => e
         warn "[GuardAgent] judge unavailable (#{e.class}): #{e.message}"
         Values::GuardResult.new(allowed: true, reason: "llm-judge unavailable: #{e.class}")
