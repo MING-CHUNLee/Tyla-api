@@ -57,18 +57,32 @@ module Tyla
 
       # First call (guard) returns a JSON judge verdict; subsequent calls
       # (tutor) return plain reply text. `verdict` controls the guard verdict.
-      def scripted_llm(verdict:, tutor_content: 'tutor reply', tutor_usage: { input_tokens: 10, output_tokens: 5 })
+      def scripted_llm(verdict:, tutor_content: 'tutor reply',
+                       guard_usage: { input_tokens: 50, output_tokens: 8 },
+                       tutor_usage: { input_tokens: 10, output_tokens: 5 })
         call_log = []
         client = Object.new
         client.define_singleton_method(:send_prompt) do |**kwargs|
           call_log << kwargs
           if call_log.size == 1
-            Infrastructure::LlmResponse.new(content: verdict.to_json, usage: {})
+            Infrastructure::LlmResponse.new(content: verdict.to_json, usage: guard_usage)
           else
             Infrastructure::LlmResponse.new(content: tutor_content, usage: tutor_usage)
           end
         end
         client.define_singleton_method(:calls) { call_log }
+        client
+      end
+
+      def raising_guard_then_tutor(tutor_usage: { input_tokens: 10, output_tokens: 5 })
+        call_count = 0
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          call_count += 1
+          raise RuntimeError, 'connection refused' if call_count == 1
+
+          Infrastructure::LlmResponse.new(content: 'tutor reply', usage: tutor_usage)
+        end
         client
       end
 
@@ -126,7 +140,8 @@ module Tyla
         _(kind).must_equal :done
         _(dto.status).must_equal 'done'
         _(dto.content).must_equal 'Step 1: ...'
-        _(dto.usage[:input_tokens]).must_equal 10
+        _(dto.usage[:input_tokens]).must_equal  60  # guard 50 + tutor 10
+        _(dto.usage[:output_tokens]).must_equal 13  # guard 8 + tutor 5
         _(client.calls.size).must_equal 2 # guard + tutor
       end
 
@@ -147,7 +162,7 @@ module Tyla
         _(kind).must_equal :forbidden
         _(dto.status).must_equal 'forbidden'
         _(dto.content).must_include "Let's redirect"
-        _(dto.usage).must_be_nil
+        _(dto.usage).must_equal(input_tokens: 50, output_tokens: 8)
         _(client.calls.size).must_equal 1 # guard only
       end
 
@@ -160,6 +175,24 @@ module Tyla
         _(dto.status).must_equal 'unavailable'
         _(dto.content).must_equal 'fallback reply'
         _(client.calls.size).must_equal 2
+      end
+
+      it 'unavailable path: dto.usage sums guard + tutor when the guard LLM responded with garbage' do
+        client  = scripted_llm(verdict: 'not-json-at-all', tutor_content: 'fallback reply')
+        outcome = call_with(llm_client: client)
+        _, dto  = outcome.value!
+        _(dto.status).must_equal 'unavailable'
+        _(dto.usage[:input_tokens]).must_equal  60  # guard 50 + tutor 10
+        _(dto.usage[:output_tokens]).must_equal 13  # guard 8 + tutor 5
+      end
+
+      it 'unavailable path: dto.usage reflects tutor only when the guard call itself raised' do
+        client  = raising_guard_then_tutor
+        outcome = call_with(llm_client: client)
+        _, dto  = outcome.value!
+        _(dto.status).must_equal 'unavailable'
+        _(dto.usage[:input_tokens]).must_equal  10  # tutor only; guard usage nil
+        _(dto.usage[:output_tokens]).must_equal  5
       end
 
       it 'returns Failure[:upstream_timeout] when the tutor LLM times out' do

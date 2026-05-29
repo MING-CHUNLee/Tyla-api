@@ -37,7 +37,7 @@ module Tyla
         log = persist_log(params, guard_result)
 
         if !llm_unavailable && !guard_result.allowed?
-          return Success([:forbidden, build_forbidden_response(log.id, params[:project_id])])
+          return Success([:forbidden, build_forbidden_response(log.id, params[:project_id], guard_result.usage)])
         end
 
         assembled = Prompts::BudgetAwarePromptAssembler.call(
@@ -60,7 +60,7 @@ module Tyla
           max_tokens:    assembled.max_tokens
         )
 
-        response = build_ok_response(log.id, llm_reply, llm_unavailable: llm_unavailable)
+        response = build_ok_response(log.id, llm_reply, guard_result, llm_unavailable: llm_unavailable)
         Success([llm_unavailable ? :unavailable : :done, response])
       rescue Infrastructure::LlmError::Timeout
         Failure[:upstream_timeout, 'LLM request timed out']
@@ -88,22 +88,31 @@ module Tyla
         Repository::PromptLogs.create(entity)
       end
 
-      def build_forbidden_response(log_id, project_id)
+      def build_forbidden_response(log_id, project_id, guard_usage)
         Response::TutorChat.new(
           log_id:  log_id,
           status:  'forbidden',
           content: Infrastructure::Filesystem::RefusalLoader.load(project_id),
-          usage:   nil
+          usage:   guard_usage
         )
       end
 
-      def build_ok_response(log_id, llm_reply, llm_unavailable:)
+      def build_ok_response(log_id, llm_reply, guard_result, llm_unavailable:)
         Response::TutorChat.new(
           log_id:  log_id,
           status:  llm_unavailable ? 'unavailable' : 'done',
           content: llm_reply.content,
-          usage:   llm_reply.usage
+          usage:   usage_sum(guard_result.usage, llm_reply.usage)
         )
+      end
+
+      def usage_sum(a, b)
+        a ||= {}
+        b ||= {}
+        {
+          input_tokens:  (a[:input_tokens]  || 0) + (b[:input_tokens]  || 0),
+          output_tokens: (a[:output_tokens] || 0) + (b[:output_tokens] || 0)
+        }
       end
     end
   end
