@@ -38,7 +38,7 @@ module Tyla
         it 'RefusalLoader extracts the ## Refusal Message section from TUTOR.md' do
           text = RefusalLoader.load('HW2')
           _(text).wont_be_empty
-          _(text).must_include "Let's redirect"
+          _(text).must_include "Let's work through this together"
         end
 
         it 'all five loaders ignore project_id in Phase 1' do

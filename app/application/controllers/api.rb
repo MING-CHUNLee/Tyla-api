@@ -49,7 +49,8 @@ module Tyla
           r.on 'guard_checks' do
             # POST /api/v1/guard_checks
             # Accepts { course_id, project_id, student_id, prompt } + X-LLM-Key header.
-            # Runs GuardAgent server-side, persists result, returns allowed/blocked decision.
+            # Runs GuardAgent server-side, persists result, and returns the unified
+            # status enum (done / forbidden / unavailable) with guard-judge usage.
             r.post do
               outcome = Services::RunGuardCheck.new.call(r.params, request.env)
 
@@ -64,9 +65,9 @@ module Tyla
                 r.halt(rep.http_status_code, rep.to_json)
               end
 
-              kind, payload = outcome.value!
-              response.status = kind == :llm_unavailable ? 202 : 200
-              payload
+              kind, dto = outcome.value!
+              response.status = kind == :unavailable ? 202 : 200
+              Representer::GuardCheck.new(dto).to_hash
             end
           end
 

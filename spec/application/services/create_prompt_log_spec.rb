@@ -32,15 +32,17 @@ module Tyla
     describe CreatePromptLog do
       include Dry::Monads[:result]
 
-      VALID_PARAMS = {
-        'course_id'          => 'CS101',
-        'project_id'         => 'proj-1',
-        'student_id'         => 'stu-xyz',
-        'timestamp'          => '2024-01-15T10:00:00Z',
-        'userPrompt'         => 'What is polymorphism?',
-        'attack_probability' => 0.05,
-        'evaluation'         => 'benign'
-      }.freeze
+      let(:valid_params) do
+        {
+          'course_id'          => 'CS101',
+          'project_id'         => 'proj-1',
+          'student_id'         => 'stu-xyz',
+          'timestamp'          => '2024-01-15T10:00:00Z',
+          'userPrompt'         => 'What is polymorphism?',
+          'attack_probability' => 0.05,
+          'evaluation'         => 'benign'
+        }
+      end
 
       before do
         Tyla::Database::PromptLogOrm.dataset = CPLS_DB[:prompt_logs]
@@ -50,7 +52,7 @@ module Tyla
       # ── (a) Hyphen normalisation ──────────────────────────────────────────────
 
       it '(a) accepts attack-probability (hyphen) and treats it as attack_probability' do
-        params = VALID_PARAMS.reject { |k, _| k == 'attack_probability' }
+        params = valid_params.reject { |k, _| k == 'attack_probability' }
                              .merge('attack-probability' => 0.1)
         outcome = CreatePromptLog.new.call(params)
         _(outcome).must_be :success?
@@ -60,7 +62,7 @@ module Tyla
       # ── (b/c/d) Validation failures ───────────────────────────────────────────
 
       it '(b) returns Failure[:cannot_process] when a required field is missing' do
-        outcome = CreatePromptLog.new.call(VALID_PARAMS.reject { |k, _| k == 'student_id' })
+        outcome = CreatePromptLog.new.call(valid_params.reject { |k, _| k == 'student_id' })
         _(outcome).must_be :failure?
         _(outcome.failure[0]).must_equal :cannot_process
         _(outcome.failure[1]).must_equal 'validation failed'
@@ -68,14 +70,14 @@ module Tyla
       end
 
       it '(c) returns Failure[:cannot_process] when timestamp is not ISO8601' do
-        outcome = CreatePromptLog.new.call(VALID_PARAMS.merge('timestamp' => 'not-a-date'))
+        outcome = CreatePromptLog.new.call(valid_params.merge('timestamp' => 'not-a-date'))
         _(outcome).must_be :failure?
         _(outcome.failure[0]).must_equal :cannot_process
         _(outcome.failure[2]).wont_be :empty?
       end
 
       it '(d) errors hash includes the offending field key' do
-        outcome = CreatePromptLog.new.call(VALID_PARAMS.reject { |k, _| k == 'userPrompt' })
+        outcome = CreatePromptLog.new.call(valid_params.reject { |k, _| k == 'userPrompt' })
         _(outcome).must_be :failure?
         errors = outcome.failure[2]
         _(errors).must_include :userPrompt
@@ -84,7 +86,7 @@ module Tyla
       # ── (e) Success path ──────────────────────────────────────────────────────
 
       it '(e) returns Success with a persisted Entity::PromptLog on valid input' do
-        outcome = CreatePromptLog.new.call(VALID_PARAMS)
+        outcome = CreatePromptLog.new.call(valid_params)
         _(outcome).must_be :success?
         entity = outcome.value!
         _(entity).must_be_kind_of Entity::PromptLog
@@ -94,7 +96,7 @@ module Tyla
       end
 
       it '(f) persists the row to the database' do
-        CreatePromptLog.new.call(VALID_PARAMS)
+        CreatePromptLog.new.call(valid_params)
         _(CPLS_DB[:prompt_logs].count).must_equal 1
       end
 
@@ -102,7 +104,7 @@ module Tyla
 
       it '(g) returns Failure[:db_error] when the repository raises Sequel::Error' do
         Repository::PromptLogs.stub(:create, ->(*) { raise Sequel::Error, 'boom' }) do
-          outcome = CreatePromptLog.new.call(VALID_PARAMS)
+          outcome = CreatePromptLog.new.call(valid_params)
           _(outcome).must_be :failure?
           _(outcome.failure[0]).must_equal :db_error
         end

@@ -161,7 +161,7 @@ module Tyla
         kind, dto = outcome.value!
         _(kind).must_equal :forbidden
         _(dto.status).must_equal 'forbidden'
-        _(dto.content).must_include "Let's redirect"
+        _(dto.content).must_include "Let's work through this together"
         _(dto.usage).must_equal(input_tokens: 50, output_tokens: 8)
         _(client.calls.size).must_equal 1 # guard only
       end

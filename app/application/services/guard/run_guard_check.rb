@@ -14,7 +14,7 @@ module Tyla
       def call(raw_params, headers)
         provider = headers['HTTP_X_LLM_PROVIDER'] || ENV.fetch('LLM_PROVIDER', 'openai')
         api_key  = headers['HTTP_X_LLM_KEY']      || ENV['OPENAI_API_KEY']
-        return Failure[:unauthorized, 'missing X-LLM-Key'] if api_key.nil? || api_key.empty?
+        return Failure[:forbidden, 'missing X-LLM-Key'] if api_key.nil? || api_key.empty?
 
         model    = headers['HTTP_X_LLM_MODEL']    || nil
         endpoint = headers['HTTP_X_LLM_ENDPOINT'] || nil
@@ -44,9 +44,9 @@ module Tyla
 
         response = build_response(result: result, log_id: log.id, llm_unavailable: llm_unavailable)
         if llm_unavailable
-          Success([:llm_unavailable, response])
+          Success([:unavailable, response])
         else
-          Success([:ok, response])
+          Success([result.allowed? ? :done : :forbidden, response])
         end
       rescue Sequel::Error
         Failure[:db_error, 'could not write log entry']
@@ -55,18 +55,17 @@ module Tyla
       private
 
       def build_response(result:, log_id:, llm_unavailable:)
+        if llm_unavailable
+          return Response::GuardCheck.new(log_id: log_id, status: 'unavailable', refusal: nil, usage: nil)
+        end
+
         allowed = result.allowed?
-
-        payload = {
-          log_id:             log_id,
-          allowed:            allowed,
-          attack_probability: result.probability&.fetch(:attack),
-          evaluation:         result.reason
-        }
-
-        payload[:refusal] = Values::RefusalTemplates.for unless allowed
-        payload[:warning] = 'guard skipped: llm unavailable' if llm_unavailable
-        payload
+        Response::GuardCheck.new(
+          log_id:  log_id,
+          status:  allowed ? 'done' : 'forbidden',
+          refusal: allowed ? nil : Values::RefusalTemplates.for,
+          usage:   result.usage
+        )
       end
     end
   end

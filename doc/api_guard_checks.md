@@ -1,14 +1,5 @@
 # API Documentation — Guard Checks
 
-> **⚠️ TARGET CONTRACT — not yet implemented (as of 2026-06-03).**
-> This document describes the **planned** unified-`status` response shape from
-> [`plans/2026-06-03-agentic-tutor-backend.md`](../plans/2026-06-03-agentic-tutor-backend.md)
-> (Workstream A), which closes the deferred open question in
-> [`plans/2026-05-27-issue-1-api-response-standardization.md`](../plans/2026-05-27-issue-1-api-response-standardization.md) §6.
-> **The live endpoint still returns `allowed: bool` (+ `attack_probability` /
-> `evaluation`) and maps a missing key to `401`** until that plan ships. The
-> sections below are the migration target, aligned with `/tutor_chats`.
-
 ## Overview
 
 `POST /api/v1/guard_checks` is the core safety-check endpoint that Tyla-api exposes to MindyCLI (the frontend TUI).
