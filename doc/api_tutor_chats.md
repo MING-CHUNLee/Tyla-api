@@ -1,5 +1,18 @@
 # API Documentation — Tutor Chats
 
+> **⚠️ Partial TARGET (as of 2026-06-03).** The `status` enum is **live** (shipped by
+> Issue-1). Three **planned** changes from
+> [`plans/2026-06-03-agentic-tutor-backend.md`](../plans/2026-06-03-agentic-tutor-backend.md)
+> (Workstream B) are marked **NEW** / **CHANGED** where they appear:
+> 1. `file_context` request field (NEW);
+> 2. `actions[]` response field (NEW);
+> 3. **the internal guard LLM is removed** — this route no longer re-runs the guard.
+>    Instead it requires a `guard_log_id` from a prior `/guard_checks` pass and verifies
+>    it against the DB (no LLM call); `usage` becomes **tutor-only** (CHANGED).
+>
+> Until the plan ships, the request has no `file_context` / `guard_log_id`, the route
+> still re-runs the guard, and responses carry no `actions[]`.
+
 ## Overview
 
 `POST /api/v1/tutor_chats` is the second leg of the guard → tutor pipeline.
@@ -7,33 +20,36 @@ Where `/guard_checks` runs the safety judge for the frontend, `/tutor_chats`
 composes the full tutor prompt from on-disk assignment artefacts and forwards
 it to the tutor LLM.
 
-The endpoint re-runs the guard server-side (defence in depth) even when
-`/guard_checks` has already passed. This keeps the trust boundary at the
-server so a client that skips or fabricates a `/guard_checks` call still
-cannot bypass safety.
+**Trust boundary (CHANGED — Workstream B).** This route no longer re-runs the guard
+LLM. Instead it requires a `guard_log_id` — the `log_id` returned by a prior
+`/guard_checks` call — and verifies against the DB that the log exists, its status was
+`done` or `unavailable` (not `forbidden`), and its stored prompt matches this request's
+`prompt`. The check is a single DB read (no second LLM call), so a client that skips or
+fabricates `/guard_checks`, or reuses a guard pass for a different prompt, still cannot
+bypass safety — and the guard's tokens are billed once, by `/guard_checks`.
 
 ```
 MindyCLI                          Tyla-api                        LLM Provider
    │                                  │                               │
    │  POST /api/v1/tutor_chats        │                               │
    │  X-LLM-Key: <token>              │                               │
-   │  { prompt, course_id, ... }      │                               │
+   │  { prompt, guard_log_id, ... }   │                               │
    │ ────────────────────────────────>│                               │
-   │                                  │  chat/completions (judge)     │
-   │                                  │ ─────────────────────────────>│
-   │                                  │  { attack-probability, eval } │
-   │                                  │ <─────────────────────────────│
-   │                                  │  INSERT prompt_logs           │
+   │                                  │  verify guard_log_id          │
+   │                                  │ ──────────> DB (no LLM)        │
+   │                                  │  status in {done,unavailable} │
+   │                                  │  & stored prompt matches?     │
    │                                  │                               │
    │                                  │  Load assignment/solution/    │
-   │                                  │  student/persona from disk    │
+   │                                  │  persona from disk            │
+   │                                  │  + inject file_context        │
    │                                  │                               │
    │                                  │  chat/completions (tutor)     │
    │                                  │ ─────────────────────────────>│
    │                                  │  { reply, usage }             │
    │                                  │ <─────────────────────────────│
    │  { log_id, status, content,      │                               │
-   │    usage }                       │                               │
+   │    actions, usage }              │                               │
    │ <────────────────────────────────│                               │
 ```
 
@@ -66,8 +82,10 @@ POST /api/v1/tutor_chats
 | `course_id` | string | Required | Course identifier, e.g. `"CSDS"` |
 | `project_id` | string | Required | Project identifier, e.g. `"HW2"`. Phase 1: any value resolves to the bundled `CSDS-HW2` fixture. |
 | `student_id` | string | Required | Student identifier |
+| `guard_log_id` | integer | Required **(NEW, Workstream B)** | The `log_id` returned by the `/guard_checks` pre-call **for this same `prompt`**. The backend verifies it (exists, status ∈ {`done`, `unavailable`}, stored prompt matches) before calling the tutor. Missing → `400`; invalid / `forbidden` / prompt-mismatch → `status: "forbidden"`. |
 | `prompt` | string | Required | The student's message |
 | `history` | array | Optional | Prior chat turns, in order. Each entry is `{ "role": "user" \| "assistant", "content": "..." }`. Capped at 500 KB at the transport layer. The backend then runs a token-budget trim (newest-first) so the assembled prompt fits the LLM channel's input window; oldest turns are silently dropped if needed. |
+| `file_context` | string | Optional | **NEW (Workstream B).** Pre-assembled, token-budgeted plain-text block of the student's workspace, built by the frontend (the backend cannot reach the student's local filesystem). Injected verbatim into the system prompt under `## Student Workspace (live)`. See [Composed system prompt](#composed-system-prompt). |
 
 ### Example Request
 
@@ -78,14 +96,16 @@ Content-Type: application/json
 X-LLM-Key: sk-xxxxxxxxxxxx
 
 {
-  "course_id":  "CSDS",
-  "project_id": "HW2",
-  "student_id": "stu-abc",
-  "prompt":     "Why is the Freedman-Diaconis rule least sensitive to outliers?",
+  "course_id":    "CSDS",
+  "project_id":   "HW2",
+  "student_id":   "stu-abc",
+  "guard_log_id": 42,
+  "prompt":       "Why is the Freedman-Diaconis rule least sensitive to outliers?",
   "history": [
     { "role": "user",      "content": "What are Sturges, Scott, and FD?" },
     { "role": "assistant", "content": "Hint 1: ..." }
-  ]
+  ],
+  "file_context": "## Project Context\nWorking dir: ...\n## File Contents\n### Hw2.Rmd\n..."
 }
 ```
 
@@ -99,9 +119,9 @@ independent layers — clients should key off `status` for branching.
 
 | `status` value | HTTP | Meaning |
 |---|---|---|
-| `done` | 200 | Guard allowed; tutor LLM replied |
-| `forbidden` | 200 | Guard refused; tutor LLM not called |
-| `unavailable` | 202 | Guard call failed (fail-open); tutor LLM replied |
+| `done` | 200 | `guard_log_id` valid (guard status `done`); tutor LLM replied |
+| `forbidden` | 200 | `guard_log_id` missing / invalid / `forbidden`, or prompt mismatch; tutor LLM not called |
+| `unavailable` | 202 | `guard_log_id` valid but its guard was fail-open (status `unavailable`); tutor LLM replied |
 
 ### Tutor reply — `status: "done"` (`200 OK`)
 
@@ -112,18 +132,51 @@ The guard allowed the prompt and the tutor LLM returned a reply.
   "log_id":  101,
   "status":  "done",
   "content": "Step 1: ...\nHint 1: ...",
+  "actions": [
+    { "type": "edit_file", "path": "hw11.R",
+      "patches": [ { "search": "mean(x)", "replace": "mean(x, na.rm=TRUE)" } ] }
+  ],
   "usage":   { "input_tokens": 4321, "output_tokens": 512 }
 }
 ```
 
-`usage` is the **sum of guard-LLM + tutor-LLM** token counts for this turn.
+`usage` is **tutor-LLM tokens only** (CHANGED — Workstream B). The guard's tokens are
+billed by `/guard_checks`; this route no longer calls the guard.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `log_id` | integer | Database ID of this turn's `prompt_logs` row |
 | `status` | string | One of `"done"`, `"forbidden"`, `"unavailable"` |
 | `content` | string | The tutor LLM's reply (or Socratic refusal text on `forbidden`) |
-| `usage` | object | Combined token counts for this turn: guard + tutor on `done` / `unavailable`; guard-only on `forbidden`. Always present on 2xx responses. |
+| `actions` | array | **NEW (Workstream B).** Structured suggestions for the TUI to execute behind a human-approval gate. `[]` or omitted when the tutor has no concrete suggestion. **Never present on `forbidden`.** See [Actions](#actions). |
+| `usage` | object \| null | **Tutor-LLM tokens only** (CHANGED). `null` on `forbidden` (no tutor call). Always present on 2xx responses. |
+
+---
+
+### Actions
+
+**NEW (Workstream B).** When the tutor has a concrete code suggestion, it appends a
+structured `actions[]` array. Each action is a tool the **frontend** executes — the
+backend never touches the student's filesystem.
+
+```
+TutorAction =
+  | { "type": "edit_file";      "path": string; "patches": [ { "search": string, "replace": string } ] }
+  | { "type": "execute_script"; "code": string }
+  | { "type": "load_file";      "path": string }
+```
+
+Rules:
+
+- **`edit_file` uses search-replace patches, never full file content.** The LLM key's
+  4000-token output ceiling cannot carry whole files; patches keep each suggestion small.
+  `search` strings must be unique enough in the file to be unambiguous.
+- **`execute_script` is read-only on the frontend** — the TUI runs it through the
+  read-only `r_exec` guard (no file writes / package installs). Changing files goes
+  through `edit_file` (which gets a diff preview), not `execute_script`.
+- **Never emit `actions` when `status` is `"forbidden"`** (or on any error).
+- The frontend renders `content`, then surfaces each action as a proposal the student
+  must approve. For `edit_file`: diff → preview → approval → write.
 
 `attack_probability` and `evaluation` are still persisted in `prompt_logs`
 and are available via `GET /api/v1/prompt_logs`; they are no longer emitted
@@ -133,43 +186,49 @@ in this response.
 
 ### Prompt blocked — `status: "forbidden"` (`200 OK`)
 
-The internal guard determined `attack_probability >= 0.7`. The tutor LLM is
-**not** called; the backend returns a Socratic redirect sourced from the
-tutor's `TUTOR.md` (`## Refusal Message` section).
+The `guard_log_id` failed verification — it does not exist, its guard verdict was
+`forbidden`, or its stored prompt does not match this request's `prompt` (e.g. a client
+tried to reuse a benign guard pass for a different message). The tutor LLM is **not**
+called; the backend returns a Socratic redirect sourced from the tutor's `TUTOR.md`
+(`## Refusal Message` section).
 
 ```json
 {
   "log_id":  102,
   "status":  "forbidden",
   "content": "Let's work through this together. What aspect of the problem would you like to explore first?",
-  "usage":   { "input_tokens": 80, "output_tokens": 12 }
+  "usage":   null
 }
 ```
 
-`usage` reflects **guard-LLM tokens only** — the tutor LLM is never called on this path.
+`usage` is `null` — no LLM is called on this path (the guard already ran in
+`/guard_checks`; this route only did a DB lookup).
 
 > **Frontend behaviour:** When `status` is `"forbidden"`, display `content`
-> to the student. Don't retry the same prompt against `/tutor_chats`.
+> to the student. Don't retry the same prompt against `/tutor_chats`. In the normal flow
+> the frontend only reaches `/tutor_chats` after a `done` / `unavailable` guard, so this
+> branch primarily guards against clients that skip or tamper with the pre-call.
 
 ---
 
-### Guard unavailable — `status: "unavailable"` (`202 Accepted`)
+### Guard was fail-open — `status: "unavailable"` (`202 Accepted`)
 
-Same fail-open policy as `/guard_checks`. If the guard call fails (timeout,
-malformed JSON, etc.) the tutor LLM is still called. The HTTP status code
-(`202`) plus `status: "unavailable"` carry the signal — no extra `warning`
-string is emitted.
+The supplied `guard_log_id` is valid but its guard verdict was `unavailable` — i.e. the
+`/guard_checks` judge had failed and fell open. The tutor LLM is still called; this route
+propagates the upstream fail-open signal so the frontend knows the prompt was **not**
+actually judged. The HTTP `202` plus `status: "unavailable"` carry the signal.
 
 ```json
 {
   "log_id":  103,
   "status":  "unavailable",
   "content": "<tutor reply>",
+  "actions": [],
   "usage":   { "input_tokens": 4100, "output_tokens": 480 }
 }
 ```
 
-`usage` reflects tutor tokens only when the guard call fails before the LLM responds (network error). If the guard LLM did respond but the verdict JSON was malformed, guard tokens are included in the sum. When both guard and tutor usage are unknown, `usage` is `{ "input_tokens": 0, "output_tokens": 0 }`.
+`usage` is tutor-LLM tokens only (this route never calls the guard).
 
 ---
 
@@ -183,7 +242,7 @@ All error responses share the common envelope used by the rest of the API:
 
 | HTTP Status | `status` value | Trigger condition |
 |-------------|----------------|-------------------|
-| `400` | `bad_request` | Body field validation failed (missing field, wrong type, history > 500 KB) |
+| `400` | `bad_request` | Body field validation failed (missing field incl. `guard_log_id`, wrong type, history > 500 KB) |
 | `403` | `forbidden` | `X-LLM-Key` header is absent or empty |
 | `404` | `not_found` | An assignment artefact file is missing on disk |
 | `500` | `internal_error` | Database write failed |
@@ -228,6 +287,14 @@ token budget, dropped entirely when it does not}
 The student's `prompt` is placed in the user-message slot. `history` entries
 sit between the system prompt and the new user message.
 
+> **NEW (Workstream B) — `file_context` injection.** When the request carries
+> `file_context`, the backend appends it as a `## Student Workspace (live)` section and
+> **suppresses the fixture `## Student Workspace Files` section** (Q-B1 resolved): the
+> frontend's live files are the source of truth, so the fixture WIP is dropped to avoid
+> sending the same file twice (and to avoid showing the LLM a stale copy). When
+> `file_context` is absent, the fixture WIP is injected as before. The live section
+> participates in the same newest-first token-budget trim.
+
 ### Phase 1 artefact paths
 
 | Role | Path |
@@ -249,5 +316,13 @@ sit between the system prompt and the new user message.
   written to the database.
 - `KeyScrubber` middleware redacts `sk-xxx` patterns from response bodies
   and logs.
-- The route makes **two LLM calls per turn** (guard + tutor). Budget
-  accordingly when sizing rate limits or cost alarms.
+- **One LLM call per turn here (CHANGED — Workstream B).** This route calls only the
+  **tutor** LLM; the guard runs once, in the `/guard_checks` pre-call. Per turn the system
+  makes two LLM calls total (guard pre-call + tutor here), but each route bills its own —
+  no double-counting.
+- **Trust without a second guard call.** The `guard_log_id` verification (log exists,
+  status ∈ {`done`, `unavailable`}, stored prompt matches) is a DB read that preserves the
+  skip/fabricate-resistant trust boundary the old internal guard provided, at no token
+  cost. **For this to be sound, `/guard_checks` must persist the judged `prompt`** with the
+  log so this route can confirm the same prompt is being tutored. See
+  [`plans/2026-06-03-agentic-tutor-backend.md`](../plans/2026-06-03-agentic-tutor-backend.md) §4.
