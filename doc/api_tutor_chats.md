@@ -141,7 +141,7 @@ tutor's `TUTOR.md` (`## Refusal Message` section).
 {
   "log_id":  102,
   "status":  "forbidden",
-  "content": "Let's redirect. Instead of asking for the answer, what step would you take first to approach this problem?",
+  "content": "Let's work through this together. What aspect of the problem would you like to explore first?",
   "usage":   { "input_tokens": 80, "output_tokens": 12 }
 }
 ```

@@ -30,3 +30,6 @@ Think step-by-step using [THOUGHT] markers, call tools with [ACTION {...}], and 
 [THOUGHT] Analyze the problem...
 [ACTION {"tool":"file_edit","input":{"path":"solution_hw1.R","content":"..."}}]
 [ANSWER] Created solution_hw1.R with complete implementation.
+
+## Refusal Message
+Let's work through this together. What aspect of the problem would you like to explore first?
