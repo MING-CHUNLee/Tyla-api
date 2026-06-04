@@ -1,17 +1,16 @@
 # API Documentation — Tutor Chats
 
-> **⚠️ Partial TARGET (as of 2026-06-03).** The `status` enum is **live** (shipped by
-> Issue-1). Three **planned** changes from
+> **✅ Shipped 2026-06-04 (Workstream B).** This doc now describes live behaviour. The
+> three changes planned in
 > [`plans/2026-06-03-agentic-tutor-backend.md`](../plans/2026-06-03-agentic-tutor-backend.md)
-> (Workstream B) are marked **NEW** / **CHANGED** where they appear:
+> (and detailed in
+> [`plans/2026-06-04-tutor-chats-contract-alignment.md`](../plans/2026-06-04-tutor-chats-contract-alignment.md))
+> are implemented and are still annotated **NEW** / **CHANGED** below for historical context:
 > 1. `file_context` request field (NEW);
 > 2. `actions[]` response field (NEW);
 > 3. **the internal guard LLM is removed** — this route no longer re-runs the guard.
 >    Instead it requires a `guard_log_id` from a prior `/guard_checks` pass and verifies
->    it against the DB (no LLM call); `usage` becomes **tutor-only** (CHANGED).
->
-> Until the plan ships, the request has no `file_context` / `guard_log_id`, the route
-> still re-runs the guard, and responses carry no `actions[]`.
+>    it against the DB (no LLM call); `usage` is now **tutor-only** (CHANGED).
 
 ## Overview
 
