@@ -199,6 +199,26 @@ module Tyla
         _(dto.actions).must_equal [{ 'type' => 'load_file', 'path' => 'hw11.R' }]
       end
 
+      it 'tool_calls path: uses tool_calls from LlmResponse when present, skipping TutorReplyParser' do
+        id         = seed_guard(attack_probability: 0.1)
+        tool_call  = { 'type' => 'edit_file', 'path' => 'hw2.R',
+                       'patches' => [{ 'search' => 'old', 'replace' => 'new' }] }
+        llm_client = Object.new
+        llm_client.define_singleton_method(:send_prompt) do |**_kwargs|
+          Infrastructure::LlmResponse.new(
+            content:    'Here is the fix.',
+            usage:      { input_tokens: 20, output_tokens: 10 },
+            tool_calls: [tool_call]
+          )
+        end
+
+        outcome = call_with(request: request_for(id), llm_client: llm_client)
+
+        _, dto = outcome.value!
+        _(dto.content).must_equal 'Here is the fix.'
+        _(dto.actions).must_equal [tool_call]
+      end
+
       it 'malformed actions JSON: drops actions but keeps the prose' do
         id    = seed_guard(attack_probability: 0.1)
         reply = "Prose stays.\n<actions>[broken json}</actions>"
@@ -253,7 +273,7 @@ module Tyla
         _(prompt).must_include '## Assignment'       # assignment header
         _(prompt).must_include '## Reference Solution'
         _(prompt).must_include 'Hw2.Rmd'             # student file
-        _(prompt).must_include '## Actions Protocol' # actions instructions
+        _(prompt).must_include '## Tool Use Guide'    # tool use decision rules
         _(captured[:user_message]).must_equal PROMPT
       end
 

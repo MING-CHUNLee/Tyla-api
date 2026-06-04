@@ -11,11 +11,61 @@ module Tyla
     # exists, its stored prompt matches this request's prompt, and its derived
     # verdict ∈ {done, unavailable}. On a pass it composes the tutor system
     # prompt from on-disk artefacts (Phase 1: fixture) plus the optional live
-    # `file_context`, forwards to the tutor LLM, and parses any `<actions>` block
-    # out of the reply. `usage` is tutor-only; forbidden carries no tutor cost.
+    # `file_context`, forwards to the tutor LLM, and parses any actions out of
+    # the reply (via native tool_use for Anthropic, XML fallback for others).
+    # `usage` is tutor-only; forbidden carries no tutor cost.
     class RunTutorChat
       include Dry::Monads[:result]
       include Dry::Monads::Do
+
+      TOOLS = [
+        {
+          name: 'edit_file',
+          description: 'Apply a search-replace patch to a file in the student workspace. ' \
+                       'Use when the exact code to fix is visible in the workspace.',
+          input_schema: {
+            type: 'object',
+            properties: {
+              path:    { type: 'string', description: 'Relative path to the file' },
+              patches: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    search:  { type: 'string', description: 'Exact snippet to find (must be unambiguous)' },
+                    replace: { type: 'string', description: 'Replacement snippet' }
+                  },
+                  required: %w[search replace]
+                }
+              }
+            },
+            required: %w[path patches]
+          }
+        },
+        {
+          name: 'execute_script',
+          description: 'Provide a read-only R demo script. Use when showing runnable example code ' \
+                       'that does not exist in any workspace file. No file writes or package installs.',
+          input_schema: {
+            type: 'object',
+            properties: {
+              code: { type: 'string', description: 'R code to execute' }
+            },
+            required: %w[code]
+          }
+        },
+        {
+          name: 'load_file',
+          description: 'Request the contents of a workspace file that was not included in the current context.',
+          input_schema: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: 'Relative path to the file to load' }
+            },
+            required: %w[path]
+          }
+        }
+      ].freeze
 
       def call(raw_params, headers)
         provider = headers['HTTP_X_LLM_PROVIDER'] || ENV.fetch('LLM_PROVIDER', 'openai')
@@ -62,9 +112,11 @@ module Tyla
           system_prompt: assembled.system_prompt,
           user_message:  params[:prompt],
           history:       assembled.history,
-          max_tokens:    assembled.max_tokens
+          max_tokens:    assembled.max_tokens,
+          tools:         TOOLS
         )
-        prose, actions = Values::TutorReplyParser.call(llm_reply.content)
+
+        prose, actions = extract_reply(llm_reply)
 
         response = build_ok_response(log.id, prose, actions, llm_reply.usage, verdict: verdict)
         Success([verdict, response])
@@ -79,6 +131,14 @@ module Tyla
       end
 
       private
+
+      def extract_reply(llm_reply)
+        if llm_reply.tool_calls.any?
+          [llm_reply.content, llm_reply.tool_calls]
+        else
+          Values::TutorReplyParser.call(llm_reply.content)
+        end
+      end
 
       # The turn row carries forward the referenced guard row's verdict fields
       # (attack_probability + evaluation), since the guard no longer runs here

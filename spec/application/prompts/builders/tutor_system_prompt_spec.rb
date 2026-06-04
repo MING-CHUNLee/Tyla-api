@@ -4,7 +4,7 @@ require_relative '../../../spec_helper'
 
 describe Tyla::Prompts::TutorSystemPrompt do
   describe '.build' do
-    it 'returns the policy text (plus the actions protocol) when no solution or files provided' do
+    it 'returns the policy text (plus the tool use guide) when no solution or files provided' do
       result = Tyla::Prompts::TutorSystemPrompt.build(
         policy_text: 'POLICY',
         solution_text: '',
@@ -14,14 +14,14 @@ describe Tyla::Prompts::TutorSystemPrompt do
       _(result).wont_include '## Student Workspace'
     end
 
-    it 'always appends the actions-protocol section' do
+    it 'always appends the tool use guide section' do
       result = Tyla::Prompts::TutorSystemPrompt.build(
         policy_text: 'POLICY',
         solution_text: '',
         context_files: []
       )
-      _(result).must_include '## Actions Protocol'
-      _(result).must_include '<actions>'
+      _(result).must_include '## Tool Use Guide'
+      _(result).must_include 'edit_file'
     end
 
     it 'renders live_context under "## Student Workspace (live)" and suppresses the fixture files' do

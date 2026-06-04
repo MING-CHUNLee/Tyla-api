@@ -11,32 +11,29 @@ module Tyla
     # the fixture `## Student Workspace Files` block (Q-B1). When absent, the
     # fixture `context_files` render as before. Exactly one section appears.
     module TutorSystemPrompt
-      # Static wire-format instructions for the structured actions array. The
-      # tutor appends a single <actions>[...]</actions> JSON block after its
-      # prose; Values::TutorReplyParser parses it back out.
-      ACTIONS_PROTOCOL = <<~PROTOCOL.strip
-        ## Actions Protocol
-        When you have a concrete, ready-to-apply code suggestion, after your prose emit a
-        single `<actions>[...]</actions>` block containing a JSON array of action objects.
-        Each object is one of:
-        - `{ "type": "edit_file", "path": "<file>", "patches": [ { "search": "<exact snippet>", "replace": "<new snippet>" } ] }` — use search/replace patches, never full file contents; make each `search` string unique enough to be unambiguous.
-        - `{ "type": "execute_script", "code": "<R code>" }` — read-only, no file writes or installs.
-        - `{ "type": "load_file", "path": "<file>" }`
-        Omit the `<actions>` block entirely when you have no concrete suggestion. Never emit it when refusing.
-      PROTOCOL
+      # Decision rules for when to call each tool. Format instructions are
+      # handled by the tool_use API — not needed in the prompt.
+      TOOL_USE_GUIDE = <<~GUIDE.strip
+        ## Tool Use Guide
+        Call `edit_file` when the exact code to fix is visible in the student workspace — apply the fix directly without asking first.
+        Call `execute_script` when the student asks for a demo, example, or step-by-step illustration — provide the R code directly without asking for confirmation first.
+        Call `load_file` when you need to see a workspace file not provided in context.
+        Do NOT offer to run code as a follow-up question ("Would you like me to..."). If code would help, call the tool immediately.
+        If you have no concrete code to act on, or when refusing, do not call any tool.
+      GUIDE
 
       def self.build(policy_text:, solution_text:, context_files:, live_context: nil)
         parts = [policy_text]
         parts << "## Reference Solution\n#{solution_text}" unless blank?(solution_text)
 
         if !blank?(live_context)
-          parts << "## Student Workspace (live)\n#{live_context}"   # NEW — suppresses fixture WIP
+          parts << "## Student Workspace (live)\n#{live_context}"
         elsif !blank?(context_files)
           file_block = context_files.map { |f| format_file(f) }.join("\n\n")
           parts << "## Student Workspace Files\n#{file_block}"
         end
 
-        parts << ACTIONS_PROTOCOL                                   # NEW — static instructions
+        parts << TOOL_USE_GUIDE
         parts.join("\n\n---\n\n")
       end
 
