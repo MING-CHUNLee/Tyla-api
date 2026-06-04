@@ -18,21 +18,21 @@ describe Tyla::Infrastructure::AnthropicClient do
 
   it 'sends the x-api-key header and parses content/usage on success' do
     stub = stub_request(:post, 'https://api.anthropic.com/v1/messages')
-      .with(
-        headers: {
-          'x-api-key'         => 'sk-ant-test',
-          'anthropic-version' => '2023-06-01',
-          'Content-Type'      => 'application/json'
-        }
-      )
-      .to_return(
-        status: 200,
-        body: {
-          content: [{ type: 'text', text: 'hello back' }],
-          usage:   { input_tokens: 7, output_tokens: 3 }
-        }.to_json,
-        headers: { 'Content-Type' => 'application/json' }
-      )
+           .with(
+             headers: {
+               'x-api-key'         => 'sk-ant-test',
+               'anthropic-version' => '2023-06-01',
+               'Content-Type'      => 'application/json'
+             }
+           )
+           .to_return(
+             status: 200,
+             body: {
+               content: [{ type: 'text', text: 'hello back' }],
+               usage:   { input_tokens: 7, output_tokens: 3 }
+             }.to_json,
+             headers: { 'Content-Type' => 'application/json' }
+           )
 
     resp = client.send_prompt(system_prompt: 'sys', user_message: 'hi')
 
@@ -47,7 +47,7 @@ describe Tyla::Infrastructure::AnthropicClient do
       .to_return(status: 503, body: 'overloaded')
 
     err = _ { client.send_prompt(system_prompt: 's', user_message: 'u') }
-      .must_raise Tyla::Infrastructure::LlmError::Upstream
+          .must_raise Tyla::Infrastructure::LlmError::Upstream
     _(err.message).must_match(/503/)
   end
 

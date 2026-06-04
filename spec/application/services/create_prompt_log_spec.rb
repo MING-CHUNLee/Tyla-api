@@ -52,7 +52,7 @@ module Tyla
       # ── (a) Hyphen normalisation ──────────────────────────────────────────────
 
       it '(a) accepts attack-probability (hyphen) and treats it as attack_probability' do
-        params = valid_params.reject { |k, _| k == 'attack_probability' }
+        params = valid_params.except('attack_probability')
                              .merge('attack-probability' => 0.1)
         outcome = CreatePromptLog.new.call(params)
         _(outcome).must_be :success?
@@ -62,7 +62,7 @@ module Tyla
       # ── (b/c/d) Validation failures ───────────────────────────────────────────
 
       it '(b) returns Failure[:cannot_process] when a required field is missing' do
-        outcome = CreatePromptLog.new.call(valid_params.reject { |k, _| k == 'student_id' })
+        outcome = CreatePromptLog.new.call(valid_params.except('student_id'))
         _(outcome).must_be :failure?
         _(outcome.failure[0]).must_equal :cannot_process
         _(outcome.failure[1]).must_equal 'validation failed'
@@ -77,7 +77,7 @@ module Tyla
       end
 
       it '(d) errors hash includes the offending field key' do
-        outcome = CreatePromptLog.new.call(valid_params.reject { |k, _| k == 'userPrompt' })
+        outcome = CreatePromptLog.new.call(valid_params.except('userPrompt'))
         _(outcome).must_be :failure?
         errors = outcome.failure[2]
         _(errors).must_include :userPrompt

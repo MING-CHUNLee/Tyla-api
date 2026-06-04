@@ -6,7 +6,7 @@ def require_app(folders = %w[domain infrastructure presentation application], wi
   ordered = ['config'] + Array(folders).map { |f| "app/#{f}" }
 
   ordered.each do |folder|
-    Dir.glob("./#{folder}/**/*.rb").sort.each do |file|
+    Dir.glob("./#{folder}/**/*.rb").each do |file|
       next if !with_initializers && file.include?('/initializers/')
 
       require File.expand_path(file)

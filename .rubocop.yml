@@ -1,0 +1,61 @@
+# RuboCop configuration for Tyla API.
+#
+# This file codifies the conventions already used throughout the codebase so
+# that RuboCop is meaningful (and safe to autocorrect) on every platform.
+
+AllCops:
+  TargetRubyVersion: 3.3
+  NewCops: enable
+  SuggestExtensions: false
+  Exclude:
+    - 'db/migrations/**/*'
+    - 'vendor/**/*'
+    - 'node_modules/**/*'
+    - 'tmp/**/*'
+
+# The repo enforces LF line endings (.gitattributes: `eol=lf`). Pin RuboCop to
+# match so checkouts on Windows don't report spurious CRLF offenses and `-a`
+# never rewrites files to CRLF.
+Layout/EndOfLine:
+  EnforcedStyle: lf
+
+# Hash values are deliberately aligned into columns (table style) across the
+# codebase. Accept both that and the default key style.
+Layout/HashAlignment:
+  EnforcedColonStyle:
+    - key
+    - table
+  EnforcedHashRocketStyle:
+    - key
+    - table
+
+# Trailing comments are intentionally aligned in several files.
+Layout/ExtraSpacing:
+  AllowBeforeTrailingComments: true
+
+# App and library classes don't carry top-level documentation comments.
+Style/Documentation:
+  Enabled: false
+
+# Interface methods (e.g. GuardAgent#check) accept keyword arguments that a
+# particular implementation may not use; that's a deliberate contract.
+Lint/UnusedMethodArgument:
+  AllowUnusedKeywordArguments: true
+
+# Specs naturally have long describe blocks, helper builders, and constants
+# defined inside example groups. The Roda routing tree (controller) and Rake
+# task definitions are declarative DSL, not long methods, so exempt them too.
+Metrics/BlockLength:
+  Exclude:
+    - 'spec/**/*'
+    - 'app/application/controllers/api.rb'
+    - 'Rakefile'
+Metrics/MethodLength:
+  Exclude:
+    - 'spec/**/*'
+Metrics/ModuleLength:
+  Exclude:
+    - 'spec/**/*'
+Lint/ConstantDefinitionInBlock:
+  Exclude:
+    - 'spec/**/*'

@@ -18,17 +18,17 @@ describe Tyla::Infrastructure::OpenAiClient do
 
   it 'sends the Bearer auth header and parses choices/usage on success' do
     stub = stub_request(:post, 'https://api.openai.com/v1/chat/completions')
-      .with(
-        headers: { 'Authorization' => 'Bearer sk-test-key', 'Content-Type' => 'application/json' }
-      )
-      .to_return(
-        status: 200,
-        body: {
-          choices: [{ message: { role: 'assistant', content: 'hi student' } }],
-          usage:   { prompt_tokens: 12, completion_tokens: 5 }
-        }.to_json,
-        headers: { 'Content-Type' => 'application/json' }
-      )
+           .with(
+             headers: { 'Authorization' => 'Bearer sk-test-key', 'Content-Type' => 'application/json' }
+           )
+           .to_return(
+             status: 200,
+             body: {
+               choices: [{ message: { role: 'assistant', content: 'hi student' } }],
+               usage:   { prompt_tokens: 12, completion_tokens: 5 }
+             }.to_json,
+             headers: { 'Content-Type' => 'application/json' }
+           )
 
     resp = client.send_prompt(system_prompt: 'sys', user_message: 'hello')
 
@@ -43,7 +43,7 @@ describe Tyla::Infrastructure::OpenAiClient do
       .to_return(status: 500, body: 'boom')
 
     err = _ { client.send_prompt(system_prompt: 's', user_message: 'u') }
-      .must_raise Tyla::Infrastructure::LlmError::Upstream
+          .must_raise Tyla::Infrastructure::LlmError::Upstream
     _(err.message).must_match(/500/)
   end
 

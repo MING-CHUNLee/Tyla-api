@@ -21,9 +21,7 @@ module Tyla
     end
 
     class << self
-      def db
-        @db
-      end
+      attr_reader :db
 
       def db=(connection)
         @db = connection

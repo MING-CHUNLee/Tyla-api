@@ -13,7 +13,8 @@ module Tyla
       def call(env)
         status, headers, body = @app.call(env)
         scrubbed = []
-        body.each { |chunk| scrubbed << scrub(chunk) }
+        # Rack response bodies only guarantee #each, not #map.
+        body.each { |chunk| scrubbed << scrub(chunk) } # rubocop:disable Style/MapIntoArray
         body.close if body.respond_to?(:close)
         [status, headers, scrubbed]
       end

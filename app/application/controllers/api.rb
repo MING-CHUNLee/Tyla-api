@@ -6,15 +6,15 @@ module Tyla
     # envelope expects. Keep this table in one place so route handlers do
     # not pattern-match raw tags inline.
     SERVICE_FAILURE_STATUS = {
-      bad_request:       :bad_request,
-      unauthorized:      :unauthorized,
-      forbidden:         :forbidden,
-      not_found:         :not_found,
-      context_overflow:  :payload_too_large,
-      cannot_process:    :cannot_process,
-      upstream_error:    :upstream_error,
-      upstream_timeout:  :upstream_timeout,
-      db_error:          :internal_error
+      bad_request: :bad_request,
+      unauthorized: :unauthorized,
+      forbidden: :forbidden,
+      not_found: :not_found,
+      context_overflow: :payload_too_large,
+      cannot_process: :cannot_process,
+      upstream_error: :upstream_error,
+      upstream_timeout: :upstream_timeout,
+      db_error: :internal_error
     }.freeze
 
     route do |r|
@@ -22,10 +22,13 @@ module Tyla
         r.on 'v1' do
           r.on 'tutor_chats' do
             # POST /api/v1/tutor_chats
-            # Accepts { course_id, project_id, student_id, prompt, history? } +
-            # X-LLM-Key header. Re-runs the guard server-side (defence in
-            # depth), composes the tutor system prompt from on-disk artefacts,
-            # and forwards to the tutor LLM. Returns the LLM reply or a refusal.
+            # Accepts { course_id, project_id, student_id, guard_log_id, prompt,
+            # history?, file_context? } + X-LLM-Key header. Verifies guard_log_id
+            # against the DB (no LLM call) — the referenced /guard_checks row must
+            # exist, match this prompt, and not be forbidden — then composes the
+            # tutor system prompt from on-disk artefacts plus the optional live
+            # file_context and forwards to the tutor LLM. Returns the LLM reply
+            # (with parsed actions[]) or a Socratic refusal.
             r.post do
               outcome = Services::RunTutorChat.new.call(r.params, request.env)
 

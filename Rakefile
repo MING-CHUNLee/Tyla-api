@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'rake/testtask'
-require_relative './require_app'
+require_relative 'require_app'
 
 desc 'Run all tests'
 Rake::TestTask.new(:spec) do |t|
@@ -108,7 +108,7 @@ namespace :db do
     end
 
     db_filename = "db/store/#{@app.environment}.db"
-    FileUtils.rm(db_filename) if File.exist?(db_filename)
+    FileUtils.rm_f(db_filename)
     puts "Deleted #{db_filename}"
   end
 

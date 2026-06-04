@@ -57,21 +57,21 @@ module Tyla
       # ── (a/b/c) Required-filter validation ───────────────────────────────────
 
       it '(a) returns Failure[:bad_request] when student_id is missing' do
-        outcome = ListPromptLogs.new.call(valid_params.reject { |k, _| k == 'student_id' })
+        outcome = ListPromptLogs.new.call(valid_params.except('student_id'))
         _(outcome).must_be :failure?
         _(outcome.failure.first).must_equal :bad_request
         _(outcome.failure.last).must_include 'student_id'
       end
 
       it '(b) returns Failure[:bad_request] when course_id is missing' do
-        outcome = ListPromptLogs.new.call(valid_params.reject { |k, _| k == 'course_id' })
+        outcome = ListPromptLogs.new.call(valid_params.except('course_id'))
         _(outcome).must_be :failure?
         _(outcome.failure.first).must_equal :bad_request
         _(outcome.failure.last).must_include 'course_id'
       end
 
       it '(c) returns Failure[:bad_request] when project_id is missing' do
-        outcome = ListPromptLogs.new.call(valid_params.reject { |k, _| k == 'project_id' })
+        outcome = ListPromptLogs.new.call(valid_params.except('project_id'))
         _(outcome).must_be :failure?
         _(outcome.failure.first).must_equal :bad_request
         _(outcome.failure.last).must_include 'project_id'
@@ -101,7 +101,7 @@ module Tyla
 
       it '(g) returns Success with PromptLog entities scoped to the triple' do
         seed_log(student_id: 'stu-xyz', course_id: 'CS101', project_id: 'proj-1', prompt: 'mine')
-        seed_log(student_id: 'other',  course_id: 'CS101', project_id: 'proj-1', prompt: 'theirs')
+        seed_log(student_id: 'other', course_id: 'CS101', project_id: 'proj-1', prompt: 'theirs')
 
         outcome = ListPromptLogs.new.call(valid_params)
         _(outcome).must_be :success?

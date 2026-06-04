@@ -5,9 +5,9 @@ source 'https://rubygems.org'
 ruby '>= 3.3.10'
 
 # Web framework & server
-gem 'puma',           '~> 6.0'
+gem 'puma', '~> 6.0'
 gem 'rack-ssl-enforcer'
-gem 'roda',           '~> 3.0'
+gem 'roda', '~> 3.0'
 gem 'tilt'
 
 # Database
@@ -15,7 +15,7 @@ gem 'sequel',         '~> 5.0'
 gem 'sqlite3',        '>= 1.0'   # dev / test
 
 group :production do
-  gem 'pg',           '~> 1.0'   # production PostgreSQL
+  gem 'pg', '~> 1.0'   # production PostgreSQL
 end
 
 # Validation & types
@@ -26,7 +26,7 @@ gem 'dry-validation', '~> 1.10'
 
 # Serialisation
 gem 'multi_json'
-gem 'roar',           '~> 1.2'
+gem 'roar', '~> 1.2'
 
 # Auth & crypto
 gem 'google-id-token'
@@ -48,7 +48,7 @@ gem 'json_schemer'
 gem 'logger'
 gem 'ostruct'
 gem 'rexml'
-gem 'table_print',    '~> 1.0'
+gem 'table_print', '~> 1.0'
 
 # Development & test
 gem 'bundler-audit'
@@ -56,7 +56,7 @@ gem 'minitest',       '~> 6.0'
 gem 'minitest-mock',  '~> 5.27'
 gem 'pry'
 gem 'rack-test'
-gem 'rake',           '~> 13.0'
+gem 'rake', '~> 13.0'
 gem 'rubocop'
 gem 'simplecov'
-gem 'webmock',        '~> 3.0'
+gem 'webmock', '~> 3.0'

@@ -56,9 +56,7 @@ module Tyla
       end
 
       def parse(response)
-        unless response.is_a?(Net::HTTPSuccess)
-          raise LlmError::Upstream, "anthropic returned #{response.code}"
-        end
+        raise LlmError::Upstream, "anthropic returned #{response.code}" unless response.is_a?(Net::HTTPSuccess)
 
         data    = JSON.parse(response.body)
         content = Array(data['content']).map { |c| c['text'] }.compact.join

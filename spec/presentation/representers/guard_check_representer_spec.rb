@@ -7,12 +7,10 @@ require File.join(ROOT, 'app/presentation/representers/guard_check_representer.r
 describe Tyla::Representer::GuardCheck do
   def build_dto(**overrides)
     Tyla::Response::GuardCheck.new(
-      **{
-        log_id:  101,
-        status:  'done',
-        refusal: nil,
-        usage:   { input_tokens: 50, output_tokens: 8 }
-      }.merge(overrides)
+      log_id: 101,
+      status: 'done',
+      refusal: nil,
+      usage: { input_tokens: 50, output_tokens: 8 }, **overrides
     )
   end
 

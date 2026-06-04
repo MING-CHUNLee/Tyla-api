@@ -14,7 +14,7 @@ module Tyla
 
       def initialize(api_key:, model: nil, endpoint: nil)
         @api_key  = api_key
-        @model    = model    || ENV.fetch('LLM_MODEL', DEFAULT_MODEL)
+        @model    = model || ENV.fetch('LLM_MODEL', DEFAULT_MODEL)
         @endpoint = URI(endpoint || ENV.fetch('OPENAI_API_BASE', DEFAULT_ENDPOINT))
       end
 
@@ -51,9 +51,7 @@ module Tyla
       end
 
       def parse(response)
-        unless response.is_a?(Net::HTTPSuccess)
-          raise LlmError::Upstream, "openai returned #{response.code}"
-        end
+        raise LlmError::Upstream, "openai returned #{response.code}" unless response.is_a?(Net::HTTPSuccess)
 
         data    = JSON.parse(response.body)
         content = data.dig('choices', 0, 'message', 'content').to_s

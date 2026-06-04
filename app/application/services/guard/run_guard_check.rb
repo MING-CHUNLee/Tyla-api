@@ -13,7 +13,7 @@ module Tyla
 
       def call(raw_params, headers)
         provider = headers['HTTP_X_LLM_PROVIDER'] || ENV.fetch('LLM_PROVIDER', 'openai')
-        api_key  = headers['HTTP_X_LLM_KEY']      || ENV['OPENAI_API_KEY']
+        api_key  = headers['HTTP_X_LLM_KEY']      || ENV.fetch('OPENAI_API_KEY', nil)
         return Failure[:forbidden, 'missing X-LLM-Key'] if api_key.nil? || api_key.empty?
 
         model    = headers['HTTP_X_LLM_MODEL']    || nil

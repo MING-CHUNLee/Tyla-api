@@ -5,7 +5,7 @@ module Tyla
     class GuardResult
       attr_reader :reason, :probability, :usage
 
-      def initialize(allowed: nil, reason:, probability: nil, usage: nil)
+      def initialize(reason:, allowed: nil, probability: nil, usage: nil)
         @allowed     = allowed
         @reason      = reason
         @probability = probability

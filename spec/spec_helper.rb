@@ -18,7 +18,7 @@ ROOT = File.expand_path('..', __dir__)
   app/infrastructure/middleware/**/*.rb
   app/application/prompts/**/*.rb
 ].each do |pattern|
-  Dir.glob(File.join(ROOT, pattern)).sort.each { |f| require f }
+  Dir.glob(File.join(ROOT, pattern)).each { |f| require f }
 end
 
 # Step 2 services — loaded after domain + infrastructure so constants are available.

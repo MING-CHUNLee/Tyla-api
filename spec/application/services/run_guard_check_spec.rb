@@ -81,13 +81,13 @@ module Tyla
       end
 
       it 'returns Failure[:forbidden] when X-LLM-Key is missing' do
-        outcome = RunGuardCheck.new.call(valid_request, valid_headers.reject { |k, _| k == 'HTTP_X_LLM_KEY' })
+        outcome = RunGuardCheck.new.call(valid_request, valid_headers.except('HTTP_X_LLM_KEY'))
         _(outcome).must_be :failure?
         _(outcome.failure.first).must_equal :forbidden
       end
 
       it 'returns Failure[:bad_request] when the body is invalid' do
-        bad     = valid_request.reject { |k, _| k == :prompt }
+        bad     = valid_request.except(:prompt)
         client  = scripted_llm(verdict: { 'attack-probability' => 0.1, 'evaluation' => 'ok' })
         outcome = call_with(request: bad, llm_client: client)
         _(outcome).must_be :failure?
