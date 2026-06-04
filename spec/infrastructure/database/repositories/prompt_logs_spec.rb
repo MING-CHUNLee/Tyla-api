@@ -97,6 +97,21 @@ describe Tyla::Repository::PromptLogs do
     end
   end
 
+  describe '.find' do
+    it 'returns the entity for an existing id' do
+      saved = Tyla::Repository::PromptLogs.create(build_entity(prompt: 'lookup me'))
+      found = Tyla::Repository::PromptLogs.find(saved.id)
+
+      _(found).must_be_instance_of Tyla::Entity::PromptLog
+      _(found.id).must_equal saved.id
+      _(found.prompt).must_equal 'lookup me'
+    end
+
+    it 'returns nil when the id is not found' do
+      _(Tyla::Repository::PromptLogs.find(-1)).must_be_nil
+    end
+  end
+
   describe '.update' do
     it 'back-fills pending fields and returns the refreshed entity' do
       pending = Tyla::Repository::PromptLogs.create(

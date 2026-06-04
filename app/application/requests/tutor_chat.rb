@@ -12,11 +12,13 @@ module Tyla
         required(:course_id).filled(:string)
         required(:project_id).filled(:string)
         required(:student_id).filled(:string)
+        required(:guard_log_id).filled(:integer)   # NEW — missing/wrong-type → bad_request (400)
         required(:prompt).filled(:string)
         optional(:history).array(:hash) do
           required(:role).filled(:string)
           required(:content).filled(:string)
         end
+        optional(:file_context).filled(:string)    # NEW — optional live-workspace block
       end
 
       rule(:history) do

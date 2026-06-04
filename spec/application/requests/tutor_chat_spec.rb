@@ -6,10 +6,11 @@ require File.join(ROOT, 'app/application/requests/tutor_chat.rb')
 describe Tyla::Request::TutorChat do
   def valid_params(**overrides)
     {
-      course_id:  'CSDS',
-      project_id: 'HW2',
-      student_id: 'stu-abc',
-      prompt:     'Why is the FD rule least sensitive to outliers?'
+      course_id:    'CSDS',
+      project_id:   'HW2',
+      student_id:   'stu-abc',
+      guard_log_id: 42,
+      prompt:       'Why is the FD rule least sensitive to outliers?'
     }.merge(overrides)
   end
 
@@ -26,12 +27,31 @@ describe Tyla::Request::TutorChat do
       _(Tyla::Request::TutorChat.new.call(params)).must_be :success?
     end
 
-    %i[course_id project_id student_id prompt].each do |field|
+    %i[course_id project_id student_id guard_log_id prompt].each do |field|
       it "fails when #{field} is missing" do
         params = valid_params
         params.delete(field)
         _(Tyla::Request::TutorChat.new.call(params)).wont_be :success?
       end
+    end
+
+    it 'fails when guard_log_id is not coercible to an integer' do
+      _(Tyla::Request::TutorChat.new.call(valid_params(guard_log_id: 'not-a-number'))).wont_be :success?
+    end
+
+    it 'coerces a numeric-string guard_log_id to an integer' do
+      result = Tyla::Request::TutorChat.new.call(valid_params(guard_log_id: '42'))
+      _(result).must_be :success?
+      _(result.to_h[:guard_log_id]).must_equal 42
+    end
+
+    it 'accepts a file_context string' do
+      params = valid_params(file_context: "## Project Context\nWorking dir: ...")
+      _(Tyla::Request::TutorChat.new.call(params)).must_be :success?
+    end
+
+    it 'succeeds when file_context is absent (optional)' do
+      _(Tyla::Request::TutorChat.new.call(valid_params)).must_be :success?
     end
 
     it 'fails when a history entry is missing role' do

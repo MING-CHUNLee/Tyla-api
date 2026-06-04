@@ -9,6 +9,11 @@ module Tyla
           rebuild_entity(db_resource)
         end
 
+        # Fetch a single row by primary key; nil when not found.
+        def find(id)
+          rebuild_entity(Database::PromptLogOrm[id])
+        end
+
         def find_all(filters = {})
           dataset = Database::PromptLogOrm.order(Sequel.desc(:created_at))
           dataset = dataset.where(student_id: filters[:student_id]) if filters[:student_id]

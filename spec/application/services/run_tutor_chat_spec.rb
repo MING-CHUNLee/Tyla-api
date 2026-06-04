@@ -39,6 +39,8 @@ module Tyla
     describe RunTutorChat do
       include Dry::Monads[:result]
 
+      PROMPT = 'Why is FD least sensitive to outliers?'
+
       let(:valid_headers) do
         {
           'HTTP_X_LLM_PROVIDER' => 'openai',
@@ -46,66 +48,48 @@ module Tyla
         }
       end
 
-      let(:valid_request) do
+      # Seed a guard-pass row directly into the in-memory table and return its id.
+      def seed_guard(attack_probability:, prompt: PROMPT, evaluation: 'ok')
+        RTC_DB[:prompt_logs].insert(
+          course_id:          'CSDS',
+          project_id:         'HW2',
+          student_id:         'stu-abc',
+          prompt:             prompt,
+          attack_probability: attack_probability,
+          evaluation:         evaluation
+        )
+      end
+
+      def request_for(guard_log_id, **overrides)
         {
-          course_id:  'CSDS',
-          project_id: 'HW2',
-          student_id: 'stu-abc',
-          prompt:     'Why is FD least sensitive to outliers?'
-        }
+          course_id:    'CSDS',
+          project_id:   'HW2',
+          student_id:   'stu-abc',
+          guard_log_id: guard_log_id,
+          prompt:       PROMPT
+        }.merge(overrides)
       end
 
-      # First call (guard) returns a JSON judge verdict; subsequent calls
-      # (tutor) return plain reply text. `verdict` controls the guard verdict.
-      def scripted_llm(verdict:, tutor_content: 'tutor reply',
-                       guard_usage: { input_tokens: 50, output_tokens: 8 },
-                       tutor_usage: { input_tokens: 10, output_tokens: 5 })
+      # Only the tutor LLM is called now — no guard arm.
+      def tutor_llm(content: 'tutor reply', usage: { input_tokens: 10, output_tokens: 5 })
         call_log = []
         client = Object.new
         client.define_singleton_method(:send_prompt) do |**kwargs|
           call_log << kwargs
-          if call_log.size == 1
-            Infrastructure::LlmResponse.new(content: verdict.to_json, usage: guard_usage)
-          else
-            Infrastructure::LlmResponse.new(content: tutor_content, usage: tutor_usage)
-          end
+          Infrastructure::LlmResponse.new(content: content, usage: usage)
         end
         client.define_singleton_method(:calls) { call_log }
         client
       end
 
-      def raising_guard_then_tutor(tutor_usage: { input_tokens: 10, output_tokens: 5 })
-        call_count = 0
+      def raising_tutor(error_class, message = 'boom')
         client = Object.new
-        client.define_singleton_method(:send_prompt) do |**_kwargs|
-          call_count += 1
-          raise RuntimeError, 'connection refused' if call_count == 1
-
-          Infrastructure::LlmResponse.new(content: 'tutor reply', usage: tutor_usage)
-        end
+        client.define_singleton_method(:send_prompt) { |**_kwargs| raise error_class, message }
+        client.define_singleton_method(:calls) { [] }
         client
       end
 
-      def raising_after_guard(error_class, message = 'boom')
-        call_log = []
-        client = Object.new
-        client.define_singleton_method(:send_prompt) do |**kwargs|
-          call_log << kwargs
-          if call_log.size == 1
-            Infrastructure::LlmResponse.new(
-              content: { 'attack-probability' => 0.1, 'evaluation' => 'ok' }.to_json,
-              usage:   {}
-            )
-          else
-            raise error_class, message
-          end
-        end
-        client.define_singleton_method(:calls) { call_log }
-        client
-      end
-
-      def call_with(llm_client:, request: nil, headers: nil)
-        request ||= valid_request
+      def call_with(llm_client:, request:, headers: nil)
         headers ||= valid_headers
         Infrastructure::LlmClient.stub(:for, llm_client) do
           RunTutorChat.new.call(request, headers)
@@ -118,122 +102,177 @@ module Tyla
       end
 
       it 'returns Failure[:forbidden] when X-LLM-Key is missing' do
-        outcome = RunTutorChat.new.call(valid_request, valid_headers.reject { |k, _| k == 'HTTP_X_LLM_KEY' })
+        id      = seed_guard(attack_probability: 0.1)
+        outcome = RunTutorChat.new.call(request_for(id), valid_headers.except('HTTP_X_LLM_KEY'))
         _(outcome).must_be :failure?
         _(outcome.failure.first).must_equal :forbidden
       end
 
-      it 'returns Failure[:bad_request] when the body is invalid' do
-        bad = valid_request.reject { |k, _| k == :prompt }
-        client = scripted_llm(verdict: { 'attack-probability' => 0.1, 'evaluation' => 'ok' })
-        outcome = call_with(request: bad, llm_client: client)
+      it 'returns Failure[:bad_request] when the body is missing prompt' do
+        id      = seed_guard(attack_probability: 0.1)
+        bad     = request_for(id).except(:prompt)
+        outcome = call_with(request: bad, llm_client: tutor_llm)
         _(outcome).must_be :failure?
         _(outcome.failure.first).must_equal :bad_request
       end
 
-      it 'allowed path: calls the tutor LLM and returns Success[:done] with content + usage' do
-        client  = scripted_llm(verdict: { 'attack-probability' => 0.1, 'evaluation' => 'fine' },
-                               tutor_content: 'Step 1: ...')
-        outcome = call_with(llm_client: client)
+      it 'returns Failure[:bad_request] when guard_log_id is missing' do
+        seed_guard(attack_probability: 0.1)
+        bad     = request_for(1).except(:guard_log_id)
+        outcome = call_with(request: bad, llm_client: tutor_llm)
+        _(outcome).must_be :failure?
+        _(outcome.failure.first).must_equal :bad_request
+      end
+
+      it 'done path: verifies guard_log_id, calls the tutor once, usage is tutor-only, actions default []' do
+        id      = seed_guard(attack_probability: 0.1)
+        client  = tutor_llm(content: 'Step 1: ...', usage: { input_tokens: 10, output_tokens: 5 })
+        outcome = call_with(request: request_for(id), llm_client: client)
+
         _(outcome).must_be :success?
         kind, dto = outcome.value!
         _(kind).must_equal :done
         _(dto.status).must_equal 'done'
         _(dto.content).must_equal 'Step 1: ...'
-        _(dto.usage[:input_tokens]).must_equal  60  # guard 50 + tutor 10
-        _(dto.usage[:output_tokens]).must_equal 13  # guard 8 + tutor 5
-        _(client.calls.size).must_equal 2 # guard + tutor
+        _(dto.actions).must_equal []
+        _(dto.usage).must_equal(input_tokens: 10, output_tokens: 5)  # tutor-only
+        _(client.calls.size).must_equal 1                            # tutor only, no guard
       end
 
-      it 'allowed path: persists a prompt_logs row with the guard probability + evaluation' do
-        client = scripted_llm(verdict: { 'attack-probability' => 0.2, 'evaluation' => 'normal' })
-        call_with(llm_client: client)
-        row = RTC_DB[:prompt_logs].first
-        _(row).wont_be_nil
-        _(row[:attack_probability]).must_be_close_to 0.2
-        _(row[:evaluation]).must_equal 'normal'
-      end
+      it 'unavailable path: a fail-open guard row (nil probability) still calls the tutor' do
+        id      = seed_guard(attack_probability: nil)
+        client  = tutor_llm(content: 'fallback reply')
+        outcome = call_with(request: request_for(id), llm_client: client)
 
-      it 'forbidden path: skips the tutor LLM and returns refusal DTO' do
-        client  = scripted_llm(verdict: { 'attack-probability' => 0.95, 'evaluation' => 'jailbreak' })
-        outcome = call_with(llm_client: client)
-        _(outcome).must_be :success?
-        kind, dto = outcome.value!
-        _(kind).must_equal :forbidden
-        _(dto.status).must_equal 'forbidden'
-        _(dto.content).must_include "Let's work through this together"
-        _(dto.usage).must_equal(input_tokens: 50, output_tokens: 8)
-        _(client.calls.size).must_equal 1 # guard only
-      end
-
-      it 'fail-open path: when guard JSON is malformed the tutor LLM is still called and status is unavailable' do
-        client  = scripted_llm(verdict: 'not-json-at-all', tutor_content: 'fallback reply')
-        outcome = call_with(llm_client: client)
         _(outcome).must_be :success?
         kind, dto = outcome.value!
         _(kind).must_equal :unavailable
         _(dto.status).must_equal 'unavailable'
         _(dto.content).must_equal 'fallback reply'
-        _(client.calls.size).must_equal 2
+        _(client.calls.size).must_equal 1
       end
 
-      it 'unavailable path: dto.usage sums guard + tutor when the guard LLM responded with garbage' do
-        client  = scripted_llm(verdict: 'not-json-at-all', tutor_content: 'fallback reply')
-        outcome = call_with(llm_client: client)
-        _, dto  = outcome.value!
-        _(dto.status).must_equal 'unavailable'
-        _(dto.usage[:input_tokens]).must_equal  60  # guard 50 + tutor 10
-        _(dto.usage[:output_tokens]).must_equal 13  # guard 8 + tutor 5
+      it 'forbidden path: a forbidden guard row (>= 0.7) skips the tutor and returns a refusal DTO' do
+        id      = seed_guard(attack_probability: 0.95)
+        client  = tutor_llm
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome).must_be :success?
+        kind, dto = outcome.value!
+        _(kind).must_equal :forbidden
+        _(dto.status).must_equal 'forbidden'
+        _(dto.content).must_include "Let's work through this together"
+        _(dto.usage).must_be_nil
+        _(dto.actions).must_be_nil
+        _(client.calls.size).must_equal 0  # tutor never called
       end
 
-      it 'unavailable path: dto.usage reflects tutor only when the guard call itself raised' do
-        client  = raising_guard_then_tutor
-        outcome = call_with(llm_client: client)
-        _, dto  = outcome.value!
-        _(dto.status).must_equal 'unavailable'
-        _(dto.usage[:input_tokens]).must_equal  10  # tutor only; guard usage nil
-        _(dto.usage[:output_tokens]).must_equal  5
+      it 'forbidden path: an unknown guard_log_id is refused without a tutor call' do
+        client  = tutor_llm
+        outcome = call_with(request: request_for(999_999), llm_client: client)
+
+        _(outcome).must_be :success?
+        kind, dto = outcome.value!
+        _(kind).must_equal :forbidden
+        _(dto.usage).must_be_nil
+        _(client.calls.size).must_equal 0
+      end
+
+      it 'forbidden path: a prompt mismatch is refused without a tutor call' do
+        id      = seed_guard(attack_probability: 0.1, prompt: 'a different, earlier prompt')
+        client  = tutor_llm
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome).must_be :success?
+        kind, = outcome.value!
+        _(kind).must_equal :forbidden
+        _(client.calls.size).must_equal 0
+      end
+
+      it 'parses an <actions> block out of the tutor reply: content is prose, actions is the parsed array' do
+        id    = seed_guard(attack_probability: 0.1)
+        reply = "Here is a hint.\n<actions>[{\"type\":\"load_file\",\"path\":\"hw11.R\"}]</actions>"
+        outcome = call_with(request: request_for(id), llm_client: tutor_llm(content: reply))
+
+        _, dto = outcome.value!
+        _(dto.content).must_equal 'Here is a hint.'
+        _(dto.actions).must_equal [{ 'type' => 'load_file', 'path' => 'hw11.R' }]
+      end
+
+      it 'malformed actions JSON: drops actions but keeps the prose' do
+        id    = seed_guard(attack_probability: 0.1)
+        reply = "Prose stays.\n<actions>[broken json}</actions>"
+        outcome = call_with(request: request_for(id), llm_client: tutor_llm(content: reply))
+
+        _, dto = outcome.value!
+        _(dto.content).must_equal 'Prose stays.'
+        _(dto.actions).must_equal []
+      end
+
+      it 'persists a tutor-turn row carrying forward the guard probability + evaluation' do
+        id = seed_guard(attack_probability: 0.2, evaluation: 'normal')
+        call_with(request: request_for(id), llm_client: tutor_llm)
+
+        # Two rows now: the seeded guard row and the new tutor-turn row.
+        turn = RTC_DB[:prompt_logs].order(:id).last
+        _(turn[:attack_probability]).must_be_close_to 0.2
+        _(turn[:evaluation]).must_equal 'normal'
+        _(turn[:prompt]).must_equal PROMPT
       end
 
       it 'returns Failure[:upstream_timeout] when the tutor LLM times out' do
-        client  = raising_after_guard(Infrastructure::LlmError::Timeout)
-        outcome = call_with(llm_client: client)
+        id      = seed_guard(attack_probability: 0.1)
+        outcome = call_with(request: request_for(id), llm_client: raising_tutor(Infrastructure::LlmError::Timeout))
         _(outcome).must_be :failure?
         _(outcome.failure.first).must_equal :upstream_timeout
       end
 
       it 'returns Failure[:upstream_error] when the tutor LLM upstream fails' do
-        client  = raising_after_guard(Infrastructure::LlmError::Upstream, 'HTTP 503')
-        outcome = call_with(llm_client: client)
+        id      = seed_guard(attack_probability: 0.1)
+        outcome = call_with(request: request_for(id),
+                            llm_client: raising_tutor(Infrastructure::LlmError::Upstream,
+                                                      'HTTP 503'))
         _(outcome).must_be :failure?
         _(outcome.failure.first).must_equal :upstream_error
       end
 
       it 'tutor system prompt embeds persona, assignment, solution and student file' do
+        id       = seed_guard(attack_probability: 0.05)
         captured = nil
         client = Object.new
-        call_log = []
         client.define_singleton_method(:send_prompt) do |**kwargs|
-          call_log << kwargs
-          if call_log.size == 1
-            Infrastructure::LlmResponse.new(
-              content: { 'attack-probability' => 0.05, 'evaluation' => 'ok' }.to_json, usage: {}
-            )
-          else
-            captured = kwargs
-            Infrastructure::LlmResponse.new(content: 'ok', usage: {})
-          end
+          captured = kwargs
+          Infrastructure::LlmResponse.new(content: 'ok', usage: {})
         end
 
-        call_with(llm_client: client)
+        call_with(request: request_for(id), llm_client: client)
 
         _(captured).wont_be_nil
         prompt = captured[:system_prompt]
         _(prompt).must_include 'Tutor-Guide Mode'   # persona
-        _(prompt).must_include '## Assignment'      # assignment header
+        _(prompt).must_include '## Assignment'       # assignment header
         _(prompt).must_include '## Reference Solution'
-        _(prompt).must_include 'Hw2.Rmd'            # student file
-        _(captured[:user_message]).must_equal valid_request[:prompt]
+        _(prompt).must_include 'Hw2.Rmd'             # student file
+        _(prompt).must_include '## Actions Protocol' # actions instructions
+        _(captured[:user_message]).must_equal PROMPT
+      end
+
+      it 'file_context injects a live workspace block and suppresses the fixture student file' do
+        id       = seed_guard(attack_probability: 0.05)
+        captured = nil
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**kwargs|
+          captured = kwargs
+          Infrastructure::LlmResponse.new(content: 'ok', usage: {})
+        end
+
+        request = request_for(id, file_context: 'LIVE_WORKSPACE_FROM_FRONTEND')
+        call_with(request: request, llm_client: client)
+
+        prompt = captured[:system_prompt]
+        _(prompt).must_include '## Student Workspace (live)'
+        _(prompt).must_include 'LIVE_WORKSPACE_FROM_FRONTEND'
+        _(prompt).wont_include '## Student Workspace Files'
       end
     end
   end
