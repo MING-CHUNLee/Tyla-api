@@ -18,7 +18,7 @@ module Tyla
         @endpoint = URI(endpoint || ENV.fetch('OPENAI_API_BASE', DEFAULT_ENDPOINT))
       end
 
-      def send_prompt(system_prompt:, user_message:, history: [], max_tokens: nil)
+      def send_prompt(system_prompt:, user_message:, history: [], max_tokens: nil, tools: [])
         messages = [{ role: 'system', content: system_prompt }]
         Array(history).each do |m|
           messages << { role: m[:role] || m['role'], content: m[:content] || m['content'] }
@@ -27,11 +27,28 @@ module Tyla
 
         payload = { model: @model, messages: messages }
         payload[:max_tokens] = max_tokens unless max_tokens.nil?
+        payload[:tools]      = openai_tools(tools) if tools.any?
+
         response = post_json(payload.to_json)
         parse(response)
       end
 
       private
+
+      # Convert from the shared Anthropic-schema format (input_schema:) to the
+      # OpenAI function-calling wrapper (type: "function", function: { parameters: }).
+      def openai_tools(tools)
+        tools.map do |t|
+          {
+            type: 'function',
+            function: {
+              name:        t[:name]        || t['name'],
+              description: t[:description] || t['description'],
+              parameters:  t[:input_schema] || t['input_schema']
+            }
+          }
+        end
+      end
 
       def post_json(body)
         warn "[OpenAiClient] POST #{@endpoint} (key: #{@api_key[0..6]}...)"
@@ -54,12 +71,22 @@ module Tyla
         raise LlmError::Upstream, "openai returned #{response.code}" unless response.is_a?(Net::HTTPSuccess)
 
         data    = JSON.parse(response.body)
-        content = data.dig('choices', 0, 'message', 'content').to_s
+        message = data.dig('choices', 0, 'message') || {}
+        content = message['content'].to_s
         usage   = {
           input_tokens:  data.dig('usage', 'prompt_tokens'),
           output_tokens: data.dig('usage', 'completion_tokens')
         }
-        LlmResponse.new(content: content, usage: usage)
+
+        tool_calls = Array(message['tool_calls']).map do |tc|
+          name = tc.dig('function', 'name')
+          args = JSON.parse(tc.dig('function', 'arguments') || '{}')
+          { 'type' => name }.merge(args)
+        rescue JSON::ParserError
+          nil
+        end.compact
+
+        LlmResponse.new(content: content, usage: usage, tool_calls: tool_calls)
       rescue JSON::ParserError => e
         raise LlmError::Upstream, "openai returned malformed JSON: #{e.message}"
       end

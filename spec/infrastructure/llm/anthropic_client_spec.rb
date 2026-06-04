@@ -39,7 +39,64 @@ describe Tyla::Infrastructure::AnthropicClient do
     _(resp.content).must_equal 'hello back'
     _(resp.usage[:input_tokens]).must_equal 7
     _(resp.usage[:output_tokens]).must_equal 3
+    _(resp.tool_calls).must_equal []
     assert_requested(stub)
+  end
+
+  it 'includes tools in the request body when provided' do
+    tools = [{ name: 'edit_file', description: 'edit', input_schema: { type: 'object', properties: {}, required: [] } }]
+    stub = stub_request(:post, 'https://api.anthropic.com/v1/messages')
+           .with { |req| JSON.parse(req.body).key?('tools') }
+           .to_return(
+             status: 200,
+             body: {
+               content: [{ type: 'text', text: 'ok' }],
+               usage:   { input_tokens: 5, output_tokens: 2 }
+             }.to_json,
+             headers: { 'Content-Type' => 'application/json' }
+           )
+
+    client.send_prompt(system_prompt: 'sys', user_message: 'hi', tools: tools)
+    assert_requested(stub)
+  end
+
+  it 'omits tools key from request body when tools is empty' do
+    stub = stub_request(:post, 'https://api.anthropic.com/v1/messages')
+           .with { |req| !JSON.parse(req.body).key?('tools') }
+           .to_return(
+             status: 200,
+             body: {
+               content: [{ type: 'text', text: 'ok' }],
+               usage:   { input_tokens: 5, output_tokens: 2 }
+             }.to_json,
+             headers: { 'Content-Type' => 'application/json' }
+           )
+
+    client.send_prompt(system_prompt: 'sys', user_message: 'hi')
+    assert_requested(stub)
+  end
+
+  it 'parses tool_use blocks into tool_calls and keeps text blocks as content' do
+    stub_request(:post, 'https://api.anthropic.com/v1/messages')
+      .to_return(
+        status: 200,
+        body: {
+          content: [
+            { type: 'text', text: 'Here is the fix.' },
+            { type: 'tool_use', name: 'edit_file',
+              input: { 'path' => 'hw2.R', 'patches' => [{ 'search' => 'old', 'replace' => 'new' }] } }
+          ],
+          usage: { input_tokens: 20, output_tokens: 15 }
+        }.to_json,
+        headers: { 'Content-Type' => 'application/json' }
+      )
+
+    resp = client.send_prompt(system_prompt: 'sys', user_message: 'fix it')
+
+    _(resp.content).must_equal 'Here is the fix.'
+    _(resp.tool_calls.size).must_equal 1
+    _(resp.tool_calls.first['type']).must_equal 'edit_file'
+    _(resp.tool_calls.first['path']).must_equal 'hw2.R'
   end
 
   it 'raises LlmError::Upstream on non-2xx response' do

@@ -19,7 +19,7 @@ module Tyla
         @model   = model
       end
 
-      def send_prompt(system_prompt:, user_message:, history: [], max_tokens: nil)
+      def send_prompt(system_prompt:, user_message:, history: [], max_tokens: nil, tools: [])
         messages = Array(history).map do |m|
           { role: m[:role] || m['role'], content: m[:content] || m['content'] }
         end
@@ -30,9 +30,10 @@ module Tyla
           max_tokens: max_tokens || DEFAULT_MAX_TOKENS,
           system:     system_prompt,
           messages:   messages
-        }.to_json
+        }
+        body[:tools] = tools if tools.any?
 
-        response = post_json(body)
+        response = post_json(body.to_json)
         parse(response)
       end
 
@@ -58,13 +59,19 @@ module Tyla
       def parse(response)
         raise LlmError::Upstream, "anthropic returned #{response.code}" unless response.is_a?(Net::HTTPSuccess)
 
-        data    = JSON.parse(response.body)
-        content = Array(data['content']).map { |c| c['text'] }.compact.join
-        usage   = {
+        data   = JSON.parse(response.body)
+        blocks = Array(data['content'])
+
+        prose      = blocks.select { |b| b['type'] == 'text' }.map { |b| b['text'] }.compact.join
+        tool_calls = blocks.select { |b| b['type'] == 'tool_use' }.map do |b|
+          { 'type' => b['name'] }.merge(b['input'] || {})
+        end
+
+        usage = {
           input_tokens:  data.dig('usage', 'input_tokens'),
           output_tokens: data.dig('usage', 'output_tokens')
         }
-        LlmResponse.new(content: content, usage: usage)
+        LlmResponse.new(content: prose, usage: usage, tool_calls: tool_calls)
       rescue JSON::ParserError => e
         raise LlmError::Upstream, "anthropic returned malformed JSON: #{e.message}"
       end
