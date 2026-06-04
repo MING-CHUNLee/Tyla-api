@@ -51,7 +51,7 @@ describe Tyla::Prompts::BudgetAwarePromptAssembler do
       # remaining = 799
       # student_file: 1000 tokens > 799 → dropped
       persona = 'P' * 24_500
-      student = 'STUDENTFILE_MARKER_' + ('x' * 3500)
+      student = "STUDENTFILE_MARKER_#{'x' * 3500}"
 
       result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
         persona:      persona,
@@ -77,10 +77,10 @@ describe Tyla::Prompts::BudgetAwarePromptAssembler do
       #   - second-newest 'HUGE' does not fit → break
       #   - oldest 'small' would fit if continued — but break means it is dropped.
       # Must exceed `remaining` *after* the newest turn has been kept. With an
-       # 8 K budget, 200 overhead, and the 'recent-small' turn costing 8 tokens,
-       # remaining drops to ~7792 before this turn is examined. 30 000 chars →
-       # ~8572 tokens — comfortably over that threshold and over the whole 8 K
-       # cap, so it cannot fit even alongside nothing else.
+      # 8 K budget, 200 overhead, and the 'recent-small' turn costing 8 tokens,
+      # remaining drops to ~7792 before this turn is examined. 30 000 chars →
+      # ~8572 tokens — comfortably over that threshold and over the whole 8 K
+      # cap, so it cannot fit even alongside nothing else.
       huge_content = 'H' * 30_000
       history = [
         { role: 'user',      content: 'old-small' },
@@ -182,6 +182,68 @@ describe Tyla::Prompts::BudgetAwarePromptAssembler do
       )
       _(result.overflow?).must_equal false
       _(result.max_tokens).must_equal 4_000
+    end
+  end
+
+  describe 'file_context (live workspace) injection' do
+    it 'renders the live block and suppresses the fixture student file when file_context fits' do
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:      '',
+        assignment:   '',
+        solution:     '',
+        student_file: { path: 'Hw2.Rmd', content: 'FIXTURE_STUDENT_FILE_MARKER' },
+        history:      [],
+        user_prompt:  '',
+        endpoint:     GITHUB_ENDPOINT,
+        file_context: 'LIVE_FILE_CONTEXT_MARKER'
+      )
+
+      _(result.overflow?).must_equal false
+      _(result.student_file_dropped).must_equal false
+      _(result.system_prompt).must_include '## Student Workspace (live)'
+      _(result.system_prompt).must_include 'LIVE_FILE_CONTEXT_MARKER'
+      _(result.system_prompt).wont_include '## Student Workspace Files'
+      _(result.system_prompt).wont_include 'FIXTURE_STUDENT_FILE_MARKER'
+    end
+
+    it 'drops an oversized file_context whole and frees the budget back to history' do
+      # 30_000 chars / 3.5 ≈ 8572 tokens — alone exceeds the 8 K cap, so the
+      # whole block is dropped. The freed budget then admits the small history turn.
+      history = [{ role: 'user', content: 'keep me' }]
+
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:      '',
+        assignment:   '',
+        solution:     '',
+        student_file: { path: 'x', content: '' },
+        history:      history,
+        user_prompt:  '',
+        endpoint:     GITHUB_ENDPOINT,
+        file_context: 'H' * 30_000
+      )
+
+      _(result.overflow?).must_equal false
+      _(result.student_file_dropped).must_equal true
+      _(result.system_prompt).wont_include '## Student Workspace (live)'
+      _(result.system_prompt).wont_include 'HHHHHHHHHH'
+      _(result.history.size).must_equal 1
+      _(result.history_turns_dropped).must_equal 0
+    end
+
+    it 'falls back to the fixture student file when file_context is absent' do
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:      '',
+        assignment:   '',
+        solution:     '',
+        student_file: { path: 'Hw2.Rmd', content: 'FIXTURE_STUDENT_FILE_MARKER' },
+        history:      [],
+        user_prompt:  '',
+        endpoint:     GITHUB_ENDPOINT
+      )
+
+      _(result.system_prompt).must_include '## Student Workspace Files'
+      _(result.system_prompt).must_include 'FIXTURE_STUDENT_FILE_MARKER'
+      _(result.system_prompt).wont_include '## Student Workspace (live)'
     end
   end
 

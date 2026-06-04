@@ -6,9 +6,14 @@ module Tyla
     # The pipeline is:
     #
     #   1. mandatory: persona + assignment + solution + user prompt + overhead
-    #   2. droppable: student file (whole-file, never per-line)
+    #   2. droppable: workspace block (whole, never per-line) — either the live
+    #      `file_context` when supplied, otherwise the fixture student file
     #   3. droppable: chat history (newest-first walk; stop at first turn that
     #      does not fit — no skip-past-large-turn, no mid-turn split)
+    #
+    # When `file_context` is present it occupies the workspace slot and the
+    # fixture student file is suppressed (Q-B1); it is budgeted in the same slot
+    # (before history) so a dropped block frees its budget back to history.
     #
     # If even (1) exceeds the channel's input budget, returns a Result with
     # `overflow? == true`; the caller maps that to HTTP 413.
@@ -22,7 +27,8 @@ module Tyla
         keyword_init: true
       )
 
-      def self.call(persona:, assignment:, solution:, student_file:, history:, user_prompt:, endpoint:)
+      def self.call(persona:, assignment:, solution:, student_file:, history:,
+                    user_prompt:, endpoint:, file_context: nil)
         budget = Values::TokenBudget.for(endpoint: endpoint)
 
         base_tokens =
@@ -45,21 +51,31 @@ module Tyla
 
         remaining = budget.input_token_limit - base_tokens
 
-        student_content = student_file && (student_file[:content] || student_file['content'])
-        student_path    = student_file && (student_file[:path]    || student_file['path'])
+        included_files = []
+        live_context   = nil
+        workspace_dropped = false
 
-        if student_content.nil? || student_content.empty?
-          included_files       = []
-          student_file_dropped = false
-        else
-          file_tokens = Values::Tokenizer.estimate(student_content)
-          if file_tokens <= remaining
-            included_files       = [{ path: student_path, content: student_content }]
-            student_file_dropped = false
-            remaining           -= file_tokens
+        if !file_context.nil? && !file_context.empty?
+          # Live workspace path — fixture student file is suppressed (Q-B1).
+          fc_tokens = Values::Tokenizer.estimate(file_context)
+          if fc_tokens <= remaining
+            live_context = file_context
+            remaining   -= fc_tokens
           else
-            included_files       = []
-            student_file_dropped = true
+            workspace_dropped = true   # dropped whole; freed budget flows to history
+          end
+        else
+          student_content = student_file && (student_file[:content] || student_file['content'])
+          student_path    = student_file && (student_file[:path]    || student_file['path'])
+
+          unless student_content.nil? || student_content.empty?
+            file_tokens = Values::Tokenizer.estimate(student_content)
+            if file_tokens <= remaining
+              included_files = [{ path: student_path, content: student_content }]
+              remaining     -= file_tokens
+            else
+              workspace_dropped = true
+            end
           end
         end
 
@@ -69,14 +85,15 @@ module Tyla
         system_prompt = TutorSystemPrompt.build(
           policy_text:   persona,
           solution_text: composed_solution,
-          context_files: included_files
+          context_files: included_files,
+          live_context:  live_context
         )
 
         Result.new(
           system_prompt:         system_prompt,
           history:               selected,
           max_tokens:            budget.output_reservation,
-          student_file_dropped:  student_file_dropped,
+          student_file_dropped:  workspace_dropped,
           history_turns_dropped: dropped,
           overflow?:             false
         )

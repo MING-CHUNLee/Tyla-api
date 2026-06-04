@@ -5,7 +5,7 @@ require 'roar/json'
 
 module Tyla
   module Response
-    TutorChat = Data.define(:log_id, :status, :content, :usage)
+    TutorChat = Data.define(:log_id, :status, :content, :actions, :usage)
   end
 
   module Representer
@@ -15,6 +15,7 @@ module Tyla
       property :log_id
       property :status
       property :content
+      property :actions          # NO render_nil → nil is OMITTED (never present on forbidden), [] renders as []
       property :usage, render_nil: true
     end
   end
