@@ -9,7 +9,11 @@ description: Request contracts validate input AND map external API names onto do
 about external API field names. By the time data leaves this layer, every
 field is named in the domain's vocabulary.
 
-Inline example: [`./create_prompt_log.rb`](./create_prompt_log.rb)
+Live contracts in this folder: [`./guard_check.rb`](./guard_check.rb) and
+[`./tutor_chat.rb`](./tutor_chat.rb). Both validate only; their services build
+the domain entity inline (they enrich it with LLM output, so a pure `to_entity`
+mapping does not apply). The `to_entity` half below is the convention for a
+plain request → entity mapping with no enrichment.
 
 ## Two responsibilities, owned together
 
@@ -22,13 +26,13 @@ boundary stays in one place:
 
 ```ruby
 # Validate
-contract = Request::CreatePromptLog.new
+contract = Request::Example.new
 result   = contract.call(r.params)
 r.halt(422, ...) unless result.success?
 
 # Map — external names die here
-entity = Request::CreatePromptLog.to_entity(result.to_h)
-saved  = Repository::PromptLogs.create(entity)
+entity = Request::Example.to_entity(result.to_h)
+saved  = Repository::Examples.create(entity)
 ```
 
 ## Naming rule

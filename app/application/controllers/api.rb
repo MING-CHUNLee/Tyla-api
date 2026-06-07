@@ -75,27 +75,12 @@ module Tyla
           end
 
           r.on 'prompt_logs' do
-            # POST /api/v1/prompt_logs
-            # Accepts the CLI guard-log payload; see
-            # Request::CreatePromptLog for the validated input shape.
-            r.post do
-              outcome = Services::CreatePromptLog.new.call(r.params)
-
-              if outcome.failure?
-                tag, message, errors = outcome.failure
-                result = Response::Result.new(
-                  status:  SERVICE_FAILURE_STATUS.fetch(tag, :internal_error),
-                  message: message,
-                  errors:  errors
-                )
-                rep = Representer::HttpResponse.new(result)
-                r.halt(rep.http_status_code, rep.to_json)
-              end
-
-              response.status = Representer::HttpResponse::HTTP_CODE.fetch(:created)
-              Representer::PromptLog.new(outcome.value!).to_hash
-            end
-
+            # Read-only route. Prompt-log *writes* now happen server-side inside
+            # /guard_checks (RunGuardCheck) and /tutor_chats (RunTutorChat). The
+            # old POST handler (CreatePromptLog) accepted client-side guard logs
+            # and was retired once the guard moved server-side — no client posts
+            # here anymore.
+            #
             # GET /api/v1/prompt_logs?student_id=X&course_id=Y&project_id=Z
             r.get do
               outcome = Services::ListPromptLogs.new.call(r.params)

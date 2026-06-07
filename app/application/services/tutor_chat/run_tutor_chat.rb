@@ -68,76 +68,48 @@ module Tyla
       ].freeze
 
       def call(raw_params, headers)
-        provider = headers['HTTP_X_LLM_PROVIDER'] || ENV.fetch('LLM_PROVIDER', 'openai')
-        api_key  = headers['HTTP_X_LLM_KEY']      || ENV.fetch('OPENAI_API_KEY', nil)
-        return Failure[:forbidden, 'missing X-LLM-Key'] if api_key.nil? || api_key.empty?
-
-        model    = headers['HTTP_X_LLM_MODEL']
-        endpoint = headers['HTTP_X_LLM_ENDPOINT']
-
-        validated = Request::TutorChat.new.call(raw_params)
-        return Failure[:bad_request, 'validation failed', validated.errors.to_h] unless validated.success?
-
-        params = validated.to_h
-
-        guard_log = Repository::PromptLogs.find(params[:guard_log_id])
-        verdict   = guard_log && guard_log.prompt == params[:prompt] &&
-                    Values::GuardLogVerdict.from(guard_log.attack_probability)
+        credentials = yield extract_credentials(headers)
+        params      = yield validate(raw_params)
+        guard_log   = yield load_guard_log(params[:guard_log_id])
+        log         = yield persist_turn(params, guard_log)
+        verdict     = derive_verdict(guard_log, params)
 
         # guard_log missing, prompt mismatch, or derived verdict :forbidden → refuse, no tutor call
-        unless %i[done unavailable].include?(verdict)
-          log = persist_turn(params, guard_log)
-          return Success([:forbidden, build_forbidden_response(log.id, params[:project_id])])
-        end
+        return forbidden_outcome(log, params[:project_id]) unless tutor_allowed?(verdict)
 
-        log = persist_turn(params, guard_log)
+        assembled = yield assemble_prompt(params, credentials[:endpoint])
+        reply     = yield request_tutor_reply(credentials, assembled, params)
 
-        llm = Infrastructure::LlmClient.for(provider: provider, api_key: api_key, model: model, endpoint: endpoint)
-
-        assembled = Prompts::BudgetAwarePromptAssembler.call(
-          persona:      Infrastructure::Filesystem::TutorPersonaLoader.load(params[:project_id]),
-          assignment:   Infrastructure::Filesystem::AssignmentLoader.load(params[:project_id]),
-          solution:     Infrastructure::Filesystem::SolutionLoader.load(params[:project_id]),
-          student_file: { path:    Infrastructure::Filesystem::StudentFileLoader::FILENAME,
-                          content: Infrastructure::Filesystem::StudentFileLoader.load(params[:project_id]) },
-          file_context: params[:file_context],
-          history:      params[:history],
-          user_prompt:  params[:prompt],
-          endpoint:     endpoint
-        )
-
-        return Failure[:context_overflow, 'prompt exceeds model context window'] if assembled.overflow?
-
-        llm_reply = llm.send_prompt(
-          system_prompt: assembled.system_prompt,
-          user_message:  params[:prompt],
-          history:       assembled.history,
-          max_tokens:    assembled.max_tokens,
-          tools:         TOOLS
-        )
-
-        prose, actions = extract_reply(llm_reply)
-
-        response = build_ok_response(log.id, prose, actions, llm_reply.usage, verdict: verdict)
-        Success([verdict, response])
-      rescue Infrastructure::LlmError::Timeout
-        Failure[:upstream_timeout, 'LLM request timed out']
-      rescue Infrastructure::LlmError::Upstream => e
-        Failure[:upstream_error, e.message]
-      rescue Errno::ENOENT => e
-        Failure[:not_found, "missing artefact: #{e.message}"]
-      rescue Sequel::Error
-        Failure[:db_error, 'could not write log entry']
+        Success(ok_outcome(log, reply, verdict))
       end
 
       private
 
-      def extract_reply(llm_reply)
-        if llm_reply.tool_calls.any?
-          [llm_reply.content, llm_reply.tool_calls]
-        else
-          Values::TutorReplyParser.call(llm_reply.content)
-        end
+      # ── Steps (each returns a Result; the chain short-circuits on Failure) ──────
+
+      def extract_credentials(headers)
+        api_key = headers['HTTP_X_LLM_KEY'] || ENV.fetch('OPENAI_API_KEY', nil)
+        return Failure[:forbidden, 'missing X-LLM-Key'] if api_key.nil? || api_key.empty?
+
+        Success(
+          provider: headers['HTTP_X_LLM_PROVIDER'] || ENV.fetch('LLM_PROVIDER', 'openai'),
+          api_key:  api_key,
+          model:    headers['HTTP_X_LLM_MODEL'],
+          endpoint: headers['HTTP_X_LLM_ENDPOINT']
+        )
+      end
+
+      def validate(raw_params)
+        validated = Request::TutorChat.new.call(raw_params)
+        return Failure[:bad_request, 'validation failed', validated.errors.to_h] unless validated.success?
+
+        Success(validated.to_h)
+      end
+
+      def load_guard_log(guard_log_id)
+        Success(Repository::PromptLogs.find(guard_log_id))
+      rescue Sequel::Error
+        Failure[:db_error, 'could not read guard log']
       end
 
       # The turn row carries forward the referenced guard row's verdict fields
@@ -154,27 +126,99 @@ module Tyla
           evaluation:         guard_log&.evaluation,
           created_at:         nil
         )
-        Repository::PromptLogs.create(entity)
+        Success(Repository::PromptLogs.create(entity))
+      rescue Sequel::Error
+        Failure[:db_error, 'could not write log entry']
       end
 
-      def build_forbidden_response(log_id, project_id)
-        Response::TutorChat.new(
-          log_id:  log_id,
+      def assemble_prompt(params, endpoint)
+        assembled = Prompts::BudgetAwarePromptAssembler.call(
+          persona:      Infrastructure::Filesystem::TutorPersonaLoader.load(params[:project_id]),
+          assignment:   Infrastructure::Filesystem::AssignmentLoader.load(params[:project_id]),
+          solution:     Infrastructure::Filesystem::SolutionLoader.load(params[:project_id]),
+          student_file: { path:    Infrastructure::Filesystem::StudentFileLoader::FILENAME,
+                          content: Infrastructure::Filesystem::StudentFileLoader.load(params[:project_id]) },
+          file_context: params[:file_context],
+          history:      params[:history],
+          user_prompt:  params[:prompt],
+          endpoint:     endpoint
+        )
+        return Failure[:context_overflow, 'prompt exceeds model context window'] if assembled.overflow?
+
+        Success(assembled)
+      rescue Errno::ENOENT => e
+        Failure[:not_found, "missing artefact: #{e.message}"]
+      end
+
+      def request_tutor_reply(credentials, assembled, params)
+        llm = Infrastructure::LlmClient.for(
+          provider: credentials[:provider],
+          api_key:  credentials[:api_key],
+          model:    credentials[:model],
+          endpoint: credentials[:endpoint]
+        )
+        reply = llm.send_prompt(
+          system_prompt: assembled.system_prompt,
+          user_message:  params[:prompt],
+          history:       assembled.history,
+          max_tokens:    assembled.max_tokens,
+          tools:         TOOLS
+        )
+        Success(reply)
+      rescue Infrastructure::LlmError::Timeout
+        Failure[:upstream_timeout, 'LLM request timed out']
+      rescue Infrastructure::LlmError::Upstream => e
+        Failure[:upstream_error, e.message]
+      end
+
+      # ── Plain helpers (no Result wrapping) ─────────────────────────────────────
+
+      def derive_verdict(guard_log, params)
+        return nil unless guard_log && guard_log.prompt == params[:prompt]
+
+        Values::GuardLogVerdict.from(guard_log.attack_probability)
+      end
+
+      def tutor_allowed?(verdict)
+        %i[done unavailable].include?(verdict)
+      end
+
+      def extract_reply(llm_reply)
+        if llm_reply.tool_calls.any?
+          [llm_reply.content, llm_reply.tool_calls]
+        else
+          Values::TutorReplyParser.call(llm_reply.content)
+        end
+      end
+
+      # ── Outcome builders (return the [kind, dto] tuple the controller unwraps) ──
+
+      # Forbidden is a *successful* business outcome, not an error — the controller
+      # renders the refusal DTO at HTTP 200. The refusal artefact read can still
+      # raise, so this returns a Result rather than a bare tuple.
+      def forbidden_outcome(log, project_id)
+        dto = Response::TutorChat.new(
+          log_id:  log.id,
           status:  'forbidden',
           content: Infrastructure::Filesystem::RefusalLoader.load(project_id),
           actions: nil,        # omitted by the representer — never present on forbidden
           usage:   nil
         )
+        Success([:forbidden, dto])
+      rescue Errno::ENOENT => e
+        Failure[:not_found, "missing artefact: #{e.message}"]
       end
 
-      def build_ok_response(log_id, prose, actions, usage, verdict:)
-        Response::TutorChat.new(
-          log_id:  log_id,
+      def ok_outcome(log, reply, verdict)
+        prose, actions = extract_reply(reply)
+        dto = Response::TutorChat.new(
+          log_id:  log.id,
           status:  verdict == :unavailable ? 'unavailable' : 'done',
           content: prose,
           actions: actions,    # [] when none
-          usage:   usage       # tutor-only
+          usage:   reply.usage # tutor-only
         )
+        [verdict, dto]
       end
     end
   end
