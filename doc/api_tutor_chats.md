@@ -84,7 +84,7 @@ POST /api/v1/tutor_chats
 | `guard_log_id` | integer | Required **(NEW, Workstream B)** | The `log_id` returned by the `/guard_checks` pre-call **for this same `prompt`**. The backend verifies it (exists, status ∈ {`done`, `unavailable`}, stored prompt matches) before calling the tutor. Missing → `400`; invalid / `forbidden` / prompt-mismatch → `status: "forbidden"`. |
 | `prompt` | string | Required | The student's message |
 | `history` | array | Optional | Prior chat turns, in order. Each entry is `{ "role": "user" \| "assistant", "content": "..." }`. Capped at 500 KB at the transport layer. The backend then runs a token-budget trim (newest-first) so the assembled prompt fits the LLM channel's input window; oldest turns are silently dropped if needed. |
-| `file_context` | string | Optional | **NEW (Workstream B).** Pre-assembled, token-budgeted plain-text block of the student's workspace, built by the frontend (the backend cannot reach the student's local filesystem). Injected verbatim into the system prompt under `## Student Workspace (live)`. See [Composed system prompt](#composed-system-prompt). |
+| `file_context` | string | Optional | **NEW (Workstream B).** Pre-assembled, token-budgeted plain-text block of the student's workspace, built by the frontend (the backend cannot reach the student's local filesystem). Injected verbatim into the system prompt under `## Student Workspace (live)`. **Line-number convention (2026-06-11):** every line of a text file in this block carries a `N| ` prefix with its real file line number (e.g. `  3| quantile(d123)`); PDF excerpts carry no prefixes. The backend appends a `## Workspace Line Numbers` guide and the `edit_file` tool schema instructs the LLM to copy the prefixes verbatim into `patches[].search` (the frontend's anchoring key) and to omit them in `replace`. See [Composed system prompt](#composed-system-prompt). |
 
 ### Example Request
 
@@ -149,6 +149,7 @@ billed by `/guard_checks`; this route no longer calls the guard.
 | `content` | string | The tutor LLM's reply (or Socratic refusal text on `forbidden`) |
 | `actions` | array | **NEW (Workstream B).** Structured suggestions for the TUI to execute behind a human-approval gate. `[]` or omitted when the tutor has no concrete suggestion. **Never present on `forbidden`.** See [Actions](#actions). |
 | `usage` | object \| null | **Tutor-LLM tokens only** (CHANGED). `null` on `forbidden` (no tutor call). Always present on 2xx responses. |
+| `warnings` | string[] | **NEW (2026-06-11, §2.7).** Backend trim notices; **omitted entirely when empty** (older clients unaffected). Values: `"file_context_dropped"` — the live `file_context` did not fit the remaining input budget and was dropped whole (the tutor did not see the student's files this turn); `"history_truncated"` — one or more oldest history turns were dropped by the newest-first trim. The CLI surfaces these as status warnings. |
 
 ---
 

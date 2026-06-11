@@ -37,6 +37,27 @@ describe Tyla::Prompts::TutorSystemPrompt do
       _(result).wont_include 'FIXTURE_WIP'
     end
 
+    it 'appends the line-number guide on the live_context branch' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: [],
+        live_context: '1| x <- 1'
+      )
+      _(result).must_include '## Workspace Line Numbers'
+      _(result).must_include 'INCLUDING the number prefixes'
+    end
+
+    it 'omits the line-number guide on the fixture files branch (no prefixes there)' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: [{ path: 'hw.R', content: 'FIXTURE_WIP' }],
+        live_context: nil
+      )
+      _(result).wont_include '## Workspace Line Numbers'
+    end
+
     it 'falls back to the fixture files block when live_context is absent' do
       result = Tyla::Prompts::TutorSystemPrompt.build(
         policy_text: 'POLICY',

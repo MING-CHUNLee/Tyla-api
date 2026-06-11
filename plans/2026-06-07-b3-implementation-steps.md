@@ -59,42 +59,71 @@ B3 plan §3 整章（安全模型）已是現成程式碼。
 
 ---
 
-## 2. Review 發現：設計文件沒明寫、但實作會踩到的 5 個點
+## 2. 五項修正（review 發現 → 定案）
 
-這節是「你問的有沒有遺漏」。每點都是我讀 code 後發現、實作時**一定要處理**、但兩份設計文件沒講清楚的。
+這五點是 codebase review 後發現、設計文件沒明寫、但實作一定踩到的。**每點已定案**，格式為
+「問題 → 修正（定案）→ 落點 Step」，落點對應 §4。
 
-### 2.1 ⚠️ `pdf_read` 工具目前**繞過 PathConfinement**（活的安全漏洞，B3 必須關掉）
-`pdf-read-tool.ts:42` 直接 `path.resolve(filePath)`（相對 cwd，**無 root 收斂**），而且只有 100k char cap。
-今天 `dispatchLoadFile()`（`execute-tutor-use-case.ts:270`）對 `.pdf` 路由到 `pdf_read` —— 也就是說
-**目前 `load_file` 一個 `.pdf` 路徑是不收斂的**。B3 把「模型指名的讀取」自動回灌 LLM，這條路必須改成：
-**由 driver 先用 PathConfinement 收斂，再餵 canonical 路徑去抽 PDF**，不可再信任 `pdf_read` 自己 resolve。
-→ 這直接決定了 G7 解析器要「自己 confine、自己 sniff、自己 cap」，不能只是呼叫現成 tool。
+### 2.1 `pdf_read` 繞過 PathConfinement → driver 自行收斂
 
-### 2.2 ⚠️ `dispatchLoadFile()` 會變成**死碼，且是不收斂的後門**
-G2 完成後，`load_file` 由 driver 消費。但若只是「在 driver 攔截」卻留著 `dispatchActions` 的
-`case 'load_file'`（`execute-tutor-use-case.ts:206`）與 `dispatchLoadFile()`，未來任何重構都可能讓
-`load_file` 又掉回那條**未收斂、用 100k char cap、會印出整檔**的舊路。**必須刪掉**該 case 與
-`dispatchLoadFile()`，讓 load_file 在終端 dispatch 路徑上**不可能**被執行。
+**問題：** `pdf-read-tool.ts:42` 用 `path.resolve(filePath)`（相對 cwd、**無 root 收斂**），且只有 100k char cap。
+今天 `dispatchLoadFile()`（`execute-tutor-use-case.ts:270`）把 `.pdf` 路由到 `pdf_read` ——
+所以 **`load_file` 載一個 `.pdf` 現在是不收斂的**。B3 會把模型指名的讀取自動回灌 LLM，這是活的 exfiltration 風險。
 
-### 2.3 ⚠️ 預算實例必須**提升到 turn scope**，否則 base 會餓死續傳載入
-今天 `FileContextBudget` 在 `buildFileContext()` 內 `new`（`:285`）、用完即丟。
-B3 要 base 讀檔與**所有續傳載入共用同一 per-turn pool**（b3 §4.6/§4.7：「載入預算 = headroom − base」）。
-→ 必須把 `new FileContextBudget(...)` 上移到 `callGateway()`，當參數傳進 `buildFileContext()`、也傳進解析器。
-**附帶風險（要寫進校準）**：若 base fallback 讀了 5 個大檔把 2200 pool 吃光，續傳載入會立刻吃到
-`skipMarker`、迴圈第 0 圈就終止。這是**設計接受的優雅退場**（marker 叫模型停手，不會無限迴圈），
-但 Phase 0 要量；若常餓死，再把「base cap」與「load cap」拆成兩個獨立額度（見 §7 校準）。
+**修正（定案）：** `load_file` 一律**不經 `pdf_read` 工具解析路徑**。改由 `ContinuationFileLoader` 先
+`PathConfinement.resolveWithinRoot(root, requested)` 收斂，**只把 canonical 路徑**交給共用的
+`extractPdfText(buffer)`（Step 2b）抽文字；PDF 與一般檔走同一條 confine → cap 路徑。
+`PdfReadTool`（ReAct/ask 用）維持現狀、不動。
 
-### 2.4 ⚠️ binary 嗅探**現在哪裡都沒有**——`file_read` 會把二進位檔當 UTF-8 硬讀
-`FileReadService.read()` 只檢查 `isContentEditable`（**純看 char 數**，`agent-file-policy.ts:79`），
-不 sniff binary；`isFilenameEditable` 的副檔名白名單**根本沒被 read 路徑呼叫**。所以一個 `.dat`/`.png`
-會被讀成亂碼 UTF-8 塞進 context。B3 規則 6（text-only）要在解析器**自己用 `readBuffer` + NUL/UTF-8 嗅探**，
-不能靠現成 `file_read`。
+**落點：** Step 2（解析器）、Step 2b（抽出共用 extractor）。
 
-### 2.5 ⚠️ resolved set 的 key：**載入失敗時可能沒有 realpath**
-b3 §4.7 說「unavailable 也進 resolved set、key 用 realpath」。但 `not-found`/`escape`/`absolute`/`empty`
-這幾種**根本算不出 canonical realpath**（realpath 會 throw）。→ key 規則要二分：
-**confine 成功 → key = `canonicalPath`；confine 失敗 → key = `unresolved:<reason>:<trim 後的原字串>`**。
-這樣「重複請同一個壞路徑」仍能去重、不耗 iteration。
+### 2.2 `dispatchLoadFile()` → 刪除（不留未收斂後門）
+
+**問題：** G2 後 `load_file` 由 driver 消費；若僅「攔截」卻保留 `dispatchActions` 的
+`case 'load_file'`（`execute-tutor-use-case.ts:206`）與 `dispatchLoadFile()`（`:269-274`），
+未來重構可能讓 `load_file` 又掉回那條**未收斂、100k char cap、整檔印出**的舊路。
+
+**修正（定案）：** 刪 `case 'load_file'` 與整個 `dispatchLoadFile()`。終端 `dispatchActions` 只剩
+`edit_file`/`execute_script`。`TutorAction`/`isTutorAction` 的 `load_file` 型別**保留**
+（後端仍回傳、driver 消費）。driver 進終端前再以 `.filter(a => a.type !== 'load_file')` 保險一次。
+
+**落點：** Step 5。
+
+### 2.3 預算實例提升到 turn scope（base 與 load 共用同一 pool）
+
+**問題：** `FileContextBudget` 在 `buildFileContext()` 內 `new`（`:285`）、用完即丟 →
+base 讀檔與續傳載入無法共用同一 per-turn pool（b3 §4.6/§4.7：載入預算 = headroom − base）。
+
+**修正（定案）：** `new FileContextBudget(...)` 上移到 `callGateway()`，作參數傳入
+`buildFileContext(instruction, budget)` 與 `loader.resolve(root, path, budget)`。整個 turn 一個 budget 實例。
+
+**附帶風險（Phase 0 校準）：** base fallback 若讀 5 個大檔吃光 2200 pool，續傳第 0 圈即 `skipMarker` →
+迴圈當圈終止。這是**設計接受的優雅退場**（marker 叫模型停手、不無限迴圈），但要量；若常餓死，
+再拆成獨立 `BASE_CAP` + `LOAD_CAP`（見 §7 校準）。
+
+**落點：** Step 3 + Step 4。
+
+### 2.4 binary 嗅探（codebase 完全沒有）
+
+**問題：** `FileReadService.read()` 只看 char 數（`isContentEditable`，`agent-file-policy.ts:79`），
+不 sniff binary；副檔名白名單 `isFilenameEditable` **根本沒被 read 路徑呼叫**。`.dat`/`.png`
+會被當亂碼 UTF-8 塞進 context。
+
+**修正（定案）：** 新增 `isProbablyText(buf)`（Step 1，domain policy）：NUL byte 即判 binary、
+控制字元比例 > 30% 判 binary。解析器對非 PDF 檔先 `readBuffer` → `isProbablyText` →
+否則回 `unsupported type (binary)` marker，通過才 `toString('utf8')`。**不靠 `file_read`**。
+
+**落點：** Step 1 + Step 2。
+
+### 2.5 resolved set 的 key 二分（失敗時無 realpath）
+
+**問題：** b3 §4.7 說 unavailable 也用 realpath 當 key，但 `not-found`/`escape`/`absolute`/`empty`
+**算不出 canonical realpath**（realpath 會 throw）。
+
+**修正（定案）：** key 二分 —— **confine 成功 → `canonicalPath`；confine 失敗 →
+`unresolved:<reason>:<trim 後原字串>`**。兩者皆寫進 `resolved` set，故「重複請同一壞路徑」也去重、不耗 iteration。
+
+**落點：** Step 2（`LoadResolution.key`）、Step 4（`resolved.has(r.key)`）。
 
 ---
 

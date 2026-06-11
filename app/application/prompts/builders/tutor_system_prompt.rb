@@ -22,12 +22,24 @@ module Tyla
         If you have no concrete code to act on, or when refusing, do not call any tool.
       GUIDE
 
+      # Line-number contract for live workspace files (plan 2026-06-11 §2.1/§2.2).
+      # Appended ONLY on the live_context branch — fixture context_files carry no
+      # line numbers, so adding it unconditionally would teach the model wrong.
+      LINE_NUMBER_GUIDE = <<~GUIDE.strip
+        ## Workspace Line Numbers
+        Every line in the live workspace files is prefixed with its line number ("12| ").
+        - In edit_file `search`, copy the lines verbatim INCLUDING the number prefixes.
+        - In edit_file `replace`, write plain code WITHOUT number prefixes.
+        - When quoting code in your explanation to the student, omit the prefixes.
+      GUIDE
+
       def self.build(policy_text:, solution_text:, context_files:, live_context: nil)
         parts = [policy_text]
         parts << "## Reference Solution\n#{solution_text}" unless blank?(solution_text)
 
         if !blank?(live_context)
           parts << "## Student Workspace (live)\n#{live_context}"
+          parts << LINE_NUMBER_GUIDE
         elsif !blank?(context_files)
           file_block = context_files.map { |f| format_file(f) }.join("\n\n")
           parts << "## Student Workspace Files\n#{file_block}"

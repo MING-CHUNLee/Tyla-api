@@ -55,6 +55,17 @@ describe Tyla::Representer::TutorChat do
       _(payload['status']).must_equal 'unavailable'
       _(payload).must_include 'actions'
     end
+
+    it 'omits warnings when nil (default — no trim notices)' do
+      payload = Tyla::Representer::TutorChat.new(build_dto).to_hash
+      _(payload).wont_include 'warnings'
+    end
+
+    it 'renders a populated warnings array' do
+      dto = build_dto(warnings: %w[file_context_dropped history_truncated])
+      payload = Tyla::Representer::TutorChat.new(dto).to_hash
+      _(payload['warnings']).must_equal %w[file_context_dropped history_truncated]
+    end
   end
 
   describe '#to_json' do

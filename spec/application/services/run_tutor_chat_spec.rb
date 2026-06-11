@@ -277,6 +277,35 @@ module Tyla
         _(captured[:user_message]).must_equal PROMPT
       end
 
+      it 'fills warnings with file_context_dropped when the live workspace exceeds the budget (§2.7)' do
+        id   = seed_guard(attack_probability: 0.1)
+        huge = 'x' * 40_000   # ~10K tokens ≫ the 8K unknown-channel input budget → whole-block drop
+        outcome = call_with(request: request_for(id, file_context: huge), llm_client: tutor_llm)
+
+        _, dto = outcome.value!
+        _(dto.warnings).must_equal ['file_context_dropped']
+      end
+
+      it 'fills warnings with history_truncated when older turns are dropped (§2.7)' do
+        id      = seed_guard(attack_probability: 0.1)
+        history = [
+          { role: 'user', content: 'y' * 40_000 },   # too big to keep → dropped
+          { role: 'assistant', content: 'short reply' }
+        ]
+        outcome = call_with(request: request_for(id, history: history), llm_client: tutor_llm)
+
+        _, dto = outcome.value!
+        _(dto.warnings).must_include 'history_truncated'
+      end
+
+      it 'leaves warnings nil on a normal turn (field then omitted by the representer)' do
+        id      = seed_guard(attack_probability: 0.1)
+        outcome = call_with(request: request_for(id), llm_client: tutor_llm)
+
+        _, dto = outcome.value!
+        _(dto.warnings).must_be_nil
+      end
+
       it 'file_context injects a live workspace block and suppresses the fixture student file' do
         id       = seed_guard(attack_probability: 0.05)
         captured = nil

@@ -22,7 +22,8 @@ module Tyla
         {
           name: 'edit_file',
           description: 'Apply a search-replace patch to a file in the student workspace. ' \
-                       'Use when the exact code to fix is visible in the workspace.',
+                       'Use when the exact code to fix is visible in the workspace. ' \
+                       'Workspace file contents are shown with a "N| " line-number prefix on every line.',
           input_schema: {
             type: 'object',
             properties: {
@@ -32,8 +33,10 @@ module Tyla
                 items: {
                   type: 'object',
                   properties: {
-                    search:  { type: 'string', description: 'Exact snippet to find (must be unambiguous)' },
-                    replace: { type: 'string', description: 'Replacement snippet' }
+                    search:  { type: 'string',
+                               description: 'Exact lines to find, copied verbatim INCLUDING the ' \
+                                            'leading "N| " line-number prefixes shown in the workspace context.' },
+                    replace: { type: 'string', description: 'Replacement code WITHOUT line-number prefixes.' }
                   },
                   required: %w[search replace]
                 }
@@ -80,7 +83,7 @@ module Tyla
         assembled = yield assemble_prompt(params, credentials[:endpoint])
         reply     = yield request_tutor_reply(credentials, assembled, params)
 
-        Success(ok_outcome(log, reply, verdict))
+        Success(ok_outcome(log, reply, verdict, assembled))
       end
 
       private
@@ -209,14 +212,21 @@ module Tyla
         Failure[:not_found, "missing artefact: #{e.message}"]
       end
 
-      def ok_outcome(log, reply, verdict)
+      # §2.7: surface the assembler's trim flags instead of dropping silently —
+      # the CLI renders these as status warnings so the student knows the tutor
+      # did not see their file / older turns this round.
+      def ok_outcome(log, reply, verdict, assembled)
         prose, actions = extract_reply(reply)
+        warnings = []
+        warnings << 'file_context_dropped' if assembled.student_file_dropped
+        warnings << 'history_truncated'    if assembled.history_turns_dropped.to_i.positive?
         dto = Response::TutorChat.new(
-          log_id:  log.id,
-          status:  verdict == :unavailable ? 'unavailable' : 'done',
-          content: prose,
-          actions: actions,    # [] when none
-          usage:   reply.usage # tutor-only
+          log_id:   log.id,
+          status:   verdict == :unavailable ? 'unavailable' : 'done',
+          content:  prose,
+          actions:  actions,    # [] when none
+          usage:    reply.usage, # tutor-only
+          warnings: warnings.empty? ? nil : warnings  # nil → field omitted by the representer
         )
         [verdict, dto]
       end
