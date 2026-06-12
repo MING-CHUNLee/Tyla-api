@@ -70,6 +70,58 @@ describe Tyla::Prompts::TutorSystemPrompt do
       _(result).wont_include '## Student Workspace (live)'
     end
 
+    it 'always renders the course-materials manifest, advertising load_reference (hybrid lazy)' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: []
+      )
+      _(result).must_include '## Available Course Materials'
+      _(result).must_include 'Not loaded by default'
+      _(result).must_include 'load_reference'
+    end
+
+    it 'swaps the manifest for the "already included" variant when the solution is injected' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: 'SOL',
+        context_files: []
+      )
+      _(result).must_include '## Available Course Materials'
+      _(result).must_include 'included below'
+      _(result).wont_include 'Not loaded by default'
+    end
+
+    it 'renders assignment_text as its own ## Assignment section' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        assignment_text: 'ASSIGNMENT_BODY',
+        solution_text: '',
+        context_files: []
+      )
+      _(result).must_include "## Assignment\nASSIGNMENT_BODY"
+    end
+
+    it 'omits the ## Assignment section when assignment_text is blank' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: []
+      )
+      _(result).wont_include '## Assignment'
+    end
+
+    it 'mentions load_reference in the tool use guide with the logistical-question carve-out' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: []
+      )
+      guide = result.split('## Tool Use Guide').last
+      _(guide).must_include 'load_reference'
+      _(guide).must_include 'purely logistical'
+    end
+
     it 'includes solution text section when provided' do
       result = Tyla::Prompts::TutorSystemPrompt.build(
         policy_text: 'POLICY',

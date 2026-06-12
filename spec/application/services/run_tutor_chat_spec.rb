@@ -229,6 +229,151 @@ module Tyla
         _(dto.actions).must_equal []
       end
 
+      # ── Hybrid lazy solution mini-loop (plan 2026-06-11) ─────────────────────
+
+      # Client that replays a fixed script of responses (one per call) and
+      # records every send_prompt kwargs for inspection.
+      def scripted_llm(*responses)
+        call_log = []
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**kwargs|
+          call_log << kwargs
+          responses.fetch(call_log.size - 1)
+        end
+        client.define_singleton_method(:calls) { call_log }
+        client
+      end
+
+      def load_reference_reply(extra_tool_calls: [], content: 'Let me consult the reference.')
+        Infrastructure::LlmResponse.new(
+          content:    content,
+          usage:      { input_tokens: 10, output_tokens: 5 },
+          tool_calls: [{ 'type' => 'load_reference', 'name' => 'reference_solution' }] + extra_tool_calls
+        )
+      end
+
+      it 'mini-loop: load_reference triggers round 2 with the solution injected and the tool removed; usage = Σ' do
+        id     = seed_guard(attack_probability: 0.1)
+        final  = Infrastructure::LlmResponse.new(content: 'Compare your binwidths.',
+                                                 usage: { input_tokens: 40, output_tokens: 20 })
+        client = scripted_llm(load_reference_reply, final)
+
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome).must_be :success?
+        _, dto = outcome.value!
+        _(client.calls.size).must_equal 2
+
+        round1_tools = client.calls[0][:tools].map { |t| t[:name] }
+        round2_tools = client.calls[1][:tools].map { |t| t[:name] }
+        _(round1_tools).must_include 'load_reference'
+        _(round2_tools).wont_include 'load_reference'           # structural termination
+        _(round2_tools).must_include 'edit_file'                # other tools survive
+
+        _(client.calls[0][:system_prompt]).wont_include '## Reference Solution'
+        _(client.calls[1][:system_prompt]).must_include '## Reference Solution'
+        _(client.calls[1][:system_prompt]).must_include 'included below'  # loaded-manifest variant
+
+        _(dto.content).must_equal 'Compare your binwidths.'     # round-1 prose discarded
+        _(dto.usage).must_equal(input_tokens: 50, output_tokens: 25)
+        _(dto.warnings).must_include 'reference_loaded'
+      end
+
+      it 'mini-loop: solution content and load_reference never appear in the serialized response' do
+        id     = seed_guard(attack_probability: 0.1)
+        final  = Infrastructure::LlmResponse.new(content: 'Here is a hint.',
+                                                 usage: { input_tokens: 40, output_tokens: 20 })
+        client = scripted_llm(load_reference_reply, final)
+
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        solution = Infrastructure::Filesystem::SolutionLoader.load('HW2')
+        marker   = solution.lines.map(&:strip).find { |line| line.length > 20 }
+        json     = Representer::TutorChat.new(dto).to_json
+        _(marker).wont_be_nil                       # fixture sanity
+        _(json).wont_include marker                 # solution never leaves the server
+        _(json).wont_include 'load_reference'       # the tool's existence stays server-side
+      end
+
+      it 'mini-loop: load_reference + edit_file in round 1 → load wins, the round-1 edit never leaks (B3 §4.5)' do
+        id   = seed_guard(attack_probability: 0.1)
+        edit = { 'type' => 'edit_file', 'path' => 'hw2.R',
+                 'patches' => [{ 'search' => 'ROUND1_LEAK', 'replace' => 'x' }] }
+        round2_action = { 'type' => 'execute_script', 'code' => 'hist(x)' }
+        final = Infrastructure::LlmResponse.new(content: 'Re-decided with the reference.',
+                                                usage: { input_tokens: 30, output_tokens: 10 },
+                                                tool_calls: [round2_action])
+        client = scripted_llm(load_reference_reply(extra_tool_calls: [edit]), final)
+
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(client.calls.size).must_equal 2
+        _(dto.actions).must_equal [round2_action]   # round-2 re-decision only
+        _(dto.content).wont_include 'ROUND1_LEAK'
+      end
+
+      it 'mini-loop: an XML-fallback <actions> load_reference also triggers round 2 (non-tool_use providers)' do
+        id    = seed_guard(attack_probability: 0.1)
+        xml   = "Checking.\n<actions>[{\"type\":\"load_reference\",\"name\":\"reference_solution\"}]</actions>"
+        final = Infrastructure::LlmResponse.new(content: 'Answer with reference.',
+                                                usage: { input_tokens: 40, output_tokens: 20 })
+        client = scripted_llm(
+          Infrastructure::LlmResponse.new(content: xml, usage: { input_tokens: 10, output_tokens: 5 }),
+          final
+        )
+
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(client.calls.size).must_equal 2
+        _(dto.content).must_equal 'Answer with reference.'
+        _(dto.warnings).must_include 'reference_loaded'
+      end
+
+      it 'mini-loop: a hallucinated terminal-round load_reference is filtered from actions, loop does not re-enter' do
+        id    = seed_guard(attack_probability: 0.1)
+        # Round 2 is structurally tool-less for load_reference, but the XML path
+        # is free text — the model can still hallucinate it there.
+        xml   = "Done.\n<actions>[{\"type\":\"load_reference\",\"name\":\"reference_solution\"}," \
+                '{"type":"execute_script","code":"hist(x)"}]</actions>'
+        client = scripted_llm(
+          load_reference_reply,
+          Infrastructure::LlmResponse.new(content: xml, usage: { input_tokens: 40, output_tokens: 20 })
+        )
+
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(client.calls.size).must_equal 2           # terminal round never re-enters the loop
+        _(dto.content).must_equal 'Done.'
+        _(dto.actions).must_equal [{ 'type' => 'execute_script', 'code' => 'hist(x)' }]
+      end
+
+      it 'mini-loop: a round-2 timeout surfaces as the existing :upstream_timeout failure' do
+        id     = seed_guard(attack_probability: 0.1)
+        count  = 0
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          count += 1
+          raise Infrastructure::LlmError::Timeout, 'boom' if count > 1
+
+          Infrastructure::LlmResponse.new(content: 'r1', usage: { input_tokens: 1, output_tokens: 1 },
+                                          tool_calls: [{ 'type' => 'load_reference', 'name' => 'reference_solution' }])
+        end
+
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome).must_be :failure?
+        _(outcome.failure.first).must_equal :upstream_timeout
+      end
+
+      it 'mini-loop: a turn that never requests the reference stays a single call with no reference_loaded warning' do
+        id      = seed_guard(attack_probability: 0.1)
+        client  = tutor_llm(content: 'plain answer')
+        _, dto  = call_with(request: request_for(id), llm_client: client).value!
+
+        _(client.calls.size).must_equal 1
+        _(dto.warnings).must_be_nil
+      end
+
       it 'persists a tutor-turn row carrying forward the guard probability + evaluation' do
         id = seed_guard(attack_probability: 0.2, evaluation: 'normal')
         call_with(request: request_for(id), llm_client: tutor_llm)
@@ -256,7 +401,7 @@ module Tyla
         _(outcome.failure.first).must_equal :upstream_error
       end
 
-      it 'tutor system prompt embeds persona, assignment, solution and student file' do
+      it 'round-1 system prompt embeds persona, assignment, manifest and student file — but NOT the solution' do
         id       = seed_guard(attack_probability: 0.05)
         captured = nil
         client = Object.new
@@ -269,11 +414,12 @@ module Tyla
 
         _(captured).wont_be_nil
         prompt = captured[:system_prompt]
-        _(prompt).must_include 'Tutor-Guide Mode'   # persona
-        _(prompt).must_include '## Assignment'       # assignment header
-        _(prompt).must_include '## Reference Solution'
-        _(prompt).must_include 'Hw2.Rmd'             # student file
-        _(prompt).must_include '## Tool Use Guide'    # tool use decision rules
+        _(prompt).must_include 'Tutor-Guide Mode'              # persona
+        _(prompt).must_include '## Assignment'                 # assignment header
+        _(prompt).must_include '## Available Course Materials' # manifest (eager)
+        _(prompt).wont_include '## Reference Solution'         # solution is lazy now
+        _(prompt).must_include 'Hw2.Rmd'                       # student file
+        _(prompt).must_include '## Tool Use Guide'             # tool use decision rules
         _(captured[:user_message]).must_equal PROMPT
       end
 

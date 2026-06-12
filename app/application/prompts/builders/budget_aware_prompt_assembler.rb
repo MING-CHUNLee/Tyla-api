@@ -5,7 +5,11 @@ module Tyla
     # Budget-aware variant that owns *all* LLM-input trimming for /tutor_chats.
     # The pipeline is:
     #
-    #   1. mandatory: persona + assignment + solution + user prompt + overhead
+    #   1. mandatory: persona + assignment + user prompt + overhead — plus the
+    #      solution ONLY when `include_solution:` is set (hybrid lazy, plan
+    #      2026-06-11): round 1 withholds it; round 2 injects it as mandatory
+    #      (the model explicitly asked), squeezing droppables, never itself.
+    #      Round-2 base equals the old always-eager base, so no new 413 path.
     #   2. droppable: workspace block (whole, never per-line) — either the live
     #      `file_context` when supplied, otherwise the fixture student file
     #   3. droppable: chat history (newest-first walk; stop at first turn that
@@ -28,13 +32,13 @@ module Tyla
       )
 
       def self.call(persona:, assignment:, solution:, student_file:, history:,
-                    user_prompt:, endpoint:, file_context: nil)
+                    user_prompt:, endpoint:, file_context: nil, include_solution: false)
         budget = Values::TokenBudget.for(endpoint: endpoint)
 
         base_tokens =
           Values::Tokenizer.estimate(persona) +
           Values::Tokenizer.estimate(assignment) +
-          Values::Tokenizer.estimate(solution) +
+          (include_solution ? Values::Tokenizer.estimate(solution) : 0) +
           Values::Tokenizer.estimate(user_prompt) +
           FORMATTING_OVERHEAD
 
@@ -81,12 +85,12 @@ module Tyla
 
         selected, dropped = trim_history(history, remaining)
 
-        composed_solution = "## Assignment\n#{assignment}\n\n## Reference Solution\n#{solution}"
         system_prompt = TutorSystemPrompt.build(
-          policy_text:   persona,
-          solution_text: composed_solution,
-          context_files: included_files,
-          live_context:  live_context
+          policy_text:     persona,
+          assignment_text: assignment,
+          solution_text:   include_solution ? solution : nil,
+          context_files:   included_files,
+          live_context:    live_context
         )
 
         Result.new(

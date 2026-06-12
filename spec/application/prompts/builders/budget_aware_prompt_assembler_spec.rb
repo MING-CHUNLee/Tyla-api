@@ -248,15 +248,16 @@ describe Tyla::Prompts::BudgetAwarePromptAssembler do
   end
 
   describe 'composition' do
-    it 'concatenates assignment + reference solution into a single solution_text section' do
+    it 'renders persona, assignment, solution and student file when include_solution is set' do
       result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
-        persona:      'PERSONA_BODY',
-        assignment:   'ASSIGNMENT_BODY',
-        solution:     'SOLUTION_BODY',
-        student_file: { path: 'Hw2.Rmd', content: 'CODE' },
-        history:      [],
-        user_prompt:  'q',
-        endpoint:     GITHUB_ENDPOINT
+        persona:          'PERSONA_BODY',
+        assignment:       'ASSIGNMENT_BODY',
+        solution:         'SOLUTION_BODY',
+        student_file:     { path: 'Hw2.Rmd', content: 'CODE' },
+        history:          [],
+        user_prompt:      'q',
+        endpoint:         GITHUB_ENDPOINT,
+        include_solution: true
       )
       _(result.system_prompt).must_include 'PERSONA_BODY'
       _(result.system_prompt).must_include '## Assignment'
@@ -265,6 +266,59 @@ describe Tyla::Prompts::BudgetAwarePromptAssembler do
       _(result.system_prompt).must_include 'SOLUTION_BODY'
       _(result.system_prompt).must_include '### Hw2.Rmd'
       _(result.system_prompt).must_include 'CODE'
+    end
+  end
+
+  describe 'hybrid lazy solution (include_solution:)' do
+    def call_assembler(include_solution:, solution: 'SOLUTION_BODY', history: [])
+      Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:          'PERSONA_BODY',
+        assignment:       'ASSIGNMENT_BODY',
+        solution:         solution,
+        student_file:     { path: 'Hw2.Rmd', content: 'CODE' },
+        history:          history,
+        user_prompt:      'q',
+        endpoint:         GITHUB_ENDPOINT,
+        include_solution: include_solution
+      )
+    end
+
+    it 'omits the solution by default (round 1): no section, manifest advertises load_reference' do
+      result = call_assembler(include_solution: false)
+      _(result.system_prompt).wont_include '## Reference Solution'
+      _(result.system_prompt).wont_include 'SOLUTION_BODY'
+      _(result.system_prompt).must_include '## Available Course Materials'
+      _(result.system_prompt).must_include 'load_reference'
+      _(result.system_prompt).must_include 'ASSIGNMENT_BODY'   # assignment stays eager
+    end
+
+    it 'does not count solution tokens in the round-1 base (oversized solution cannot overflow round 1)' do
+      # 30_000 chars ≈ 8572 tokens — alone exceeds the 8 K cap. Round 1 must
+      # ignore it entirely: no overflow, and the freed budget admits history.
+      result = call_assembler(include_solution: false, solution: 'S' * 30_000,
+                              history: [{ role: 'user', content: 'keep me' }])
+      _(result.overflow?).must_equal false
+      _(result.history.size).must_equal 1
+    end
+
+    it 'counts solution tokens as mandatory on round 2 — same 413 boundary as the old eager base' do
+      # Regression guard: round-2 base = persona + assignment + solution +
+      # prompt + overhead, exactly the pre-hybrid formula, so a solution that
+      # overflowed yesterday overflows today and nothing new sneaks past.
+      result = call_assembler(include_solution: true, solution: 'S' * 30_000)
+      _(result.overflow?).must_equal true
+      _(result.system_prompt).must_be_nil
+    end
+
+    it 'squeezes droppables (history), never the solution, when round 2 is tight' do
+      # base(true) = persona(4) + assignment(5) + solution(2000) + prompt(1) + 200 = 2210
+      # remaining = 8000 - 2210 = 5790; CODE file fits; a 5800-token turn does not.
+      big_turn = { role: 'user', content: 'h' * 20_300 }   # ≈ 5800 tokens + 4 role
+      result   = call_assembler(include_solution: true, solution: 'S' * 7_000,
+                                history: [big_turn])
+      _(result.overflow?).must_equal false
+      _(result.system_prompt).must_include '## Reference Solution'
+      _(result.history_turns_dropped).must_equal 1
     end
   end
 end

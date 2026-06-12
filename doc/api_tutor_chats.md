@@ -142,14 +142,20 @@ The guard allowed the prompt and the tutor LLM returned a reply.
 `usage` is **tutor-LLM tokens only** (CHANGED — Workstream B). The guard's tokens are
 billed by `/guard_checks`; this route no longer calls the guard.
 
+> **CHANGED (2026-06-12, hybrid lazy solution).** `usage` is now the **sum over all
+> tutor LLM calls made this turn**. Normally that is one call; when the tutor consults
+> the reference solution (see [Hybrid lazy solution loading](#hybrid-lazy-solution-loading))
+> the backend makes a second call and `usage` is the Σ of both rounds'
+> `input_tokens` / `output_tokens`.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `log_id` | integer | Database ID of this turn's `prompt_logs` row |
 | `status` | string | One of `"done"`, `"forbidden"`, `"unavailable"` |
 | `content` | string | The tutor LLM's reply (or Socratic refusal text on `forbidden`) |
 | `actions` | array | **NEW (Workstream B).** Structured suggestions for the TUI to execute behind a human-approval gate. `[]` or omitted when the tutor has no concrete suggestion. **Never present on `forbidden`.** See [Actions](#actions). |
-| `usage` | object \| null | **Tutor-LLM tokens only** (CHANGED). `null` on `forbidden` (no tutor call). Always present on 2xx responses. |
-| `warnings` | string[] | **NEW (2026-06-11, §2.7).** Backend trim notices; **omitted entirely when empty** (older clients unaffected). Values: `"file_context_dropped"` — the live `file_context` did not fit the remaining input budget and was dropped whole (the tutor did not see the student's files this turn); `"history_truncated"` — one or more oldest history turns were dropped by the newest-first trim. The CLI surfaces these as status warnings. |
+| `usage` | object \| null | **Tutor-LLM tokens only** (CHANGED). **Σ over all tutor calls this turn** (1 normally, 2 when the reference solution was consulted — CHANGED 2026-06-12). `null` on `forbidden` (no tutor call). Always present on 2xx responses. |
+| `warnings` | string[] | **NEW (2026-06-11, §2.7).** Backend trim notices; **omitted entirely when empty** (older clients unaffected). Values: `"file_context_dropped"` — the live `file_context` did not fit the remaining input budget and was dropped whole (the tutor did not see the student's files this turn); `"history_truncated"` — one or more oldest history turns were dropped by the newest-first trim; `"reference_loaded"` (**NEW 2026-06-12**) — the tutor consulted the instructor's reference solution server-side this turn (informational; the solution content itself is never returned). The CLI surfaces these as status warnings. |
 
 ---
 
@@ -175,6 +181,10 @@ Rules:
   read-only `r_exec` guard (no file writes / package installs). Changing files goes
   through `edit_file` (which gets a diff preview), not `execute_script`.
 - **Never emit `actions` when `status` is `"forbidden"`** (or on any error).
+- **`load_reference` never appears in `actions`** (2026-06-12). It is a server-side
+  tool: the backend consumes it inside the turn (see
+  [Hybrid lazy solution loading](#hybrid-lazy-solution-loading)) and defensively
+  filters it from the terminal `actions` array. Clients never need to handle it.
 - The frontend renders `content`, then surfaces each action as a proposal the student
   must approve. For `edit_file`: diff → preview → approval → write.
 
@@ -257,6 +267,35 @@ All error responses share the common envelope used by the rest of the API:
 
 ---
 
+## Hybrid lazy solution loading
+
+**NEW (2026-06-12,
+[`plans/2026-06-11-hybrid-lazy-solution-implementation.md`](../plans/2026-06-11-hybrid-lazy-solution-implementation.md)).**
+The reference solution is no longer sent to the tutor LLM on every call. Each turn is a
+bounded two-round mini-loop, invisible to the client:
+
+1. **Round 1** — system prompt carries persona + assignment + a course-materials
+   *manifest* (the solution's existence, not its content) and offers a server-side
+   `load_reference` tool.
+2. If the model calls `load_reference`, the backend **re-assembles** the prompt with the
+   solution injected, removes the tool from the tool list (structural termination — a
+   third round is impossible), and calls the LLM once more. **Round 2's reply is the
+   terminal reply**; round 1's prose is discarded.
+
+Client-visible effects, all backward-compatible:
+
+- `usage` = Σ of both rounds when the loop ran (see above);
+- `warnings` gains `"reference_loaded"` on loop turns;
+- `actions` never contains `load_reference`;
+- the solution content itself never appears in any response field;
+- worst-case latency doubles on loop turns (2 × the 30 s upstream timeout).
+
+State does **not** persist across turns: a follow-up question re-triggers the loop if the
+model needs the solution again (Phase 1 decision — accepted, measured via the
+`reference_loaded` rate).
+
+---
+
 ## Composed system prompt
 
 The server reads four artefacts on every allowed call and concatenates them
@@ -267,11 +306,18 @@ in this order via `Prompts::TutorSystemPrompt.build`:
 
 ---
 
-## Reference Solution
 ## Assignment
 {HW 02.docx.txt content}
 
-## Reference Solution
+---
+
+## Available Course Materials
+{manifest: advertises `reference_solution` via `load_reference` (round 1);
+switches to an "included below" notice once loaded (round 2)}
+
+---
+
+## Reference Solution            ← round 2 only (hybrid lazy)
 {Hw2.Rmd reference-solution content}
 
 ---
@@ -316,10 +362,16 @@ sit between the system prompt and the new user message.
   written to the database.
 - `KeyScrubber` middleware redacts `sk-xxx` patterns from response bodies
   and logs.
-- **One LLM call per turn here (CHANGED — Workstream B).** This route calls only the
-  **tutor** LLM; the guard runs once, in the `/guard_checks` pre-call. Per turn the system
-  makes two LLM calls total (guard pre-call + tutor here), but each route bills its own —
-  no double-counting.
+- **Tutor-only LLM calls here (CHANGED — Workstream B; 2026-06-12).** This route calls
+  only the **tutor** LLM — once normally, twice when the hybrid lazy mini-loop consults
+  the reference solution. The guard runs once, in the `/guard_checks` pre-call. Each
+  route bills its own calls — no double-counting; this route's `usage` is the Σ of its
+  own 1–2 tutor calls.
+- **The solution stays server-side (2026-06-12).** `load_reference` and the
+  course-materials manifest exist only in the LLM API payload (tool list / system
+  prompt), never in the HTTP response: the tool is filtered from `actions`, and the
+  solution text is injected only into the round-2 system prompt. The only client-visible
+  trace is the content-free `"reference_loaded"` warning.
 - **Trust without a second guard call.** The `guard_log_id` verification (log exists,
   status ∈ {`done`, `unavailable`}, stored prompt matches) is a DB read that preserves the
   skip/fabricate-resistant trust boundary the old internal guard provided, at no token
