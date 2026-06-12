@@ -452,6 +452,68 @@ module Tyla
         _(dto.warnings).must_be_nil
       end
 
+      it 'fills warnings with workspace_overview_dropped when the overview exceeds the budget' do
+        id   = seed_guard(attack_probability: 0.1)
+        huge = 'o' * 40_000   # ≫ the unknown-channel input budget → whole-block drop
+        outcome = call_with(request: request_for(id, workspace_overview: huge), llm_client: tutor_llm)
+
+        _, dto = outcome.value!
+        _(dto.warnings).must_include 'workspace_overview_dropped'
+      end
+
+      # ── Workspace edit gate (plan 2026-06-12 §2.2) ───────────────────────────
+
+      def edit_file_tool(path)
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          Infrastructure::LlmResponse.new(
+            content:    'Fixing it.',
+            usage:      { input_tokens: 10, output_tokens: 5 },
+            tool_calls: [{ 'type' => 'edit_file', 'path' => path,
+                           'patches' => [{ 'search' => '69| old', 'replace' => 'new' }] }]
+          )
+        end
+        client.define_singleton_method(:calls) { [] }
+        client
+      end
+
+      it 'gate: with workspace_overview, an edit_file for an unloaded path is rewritten to load_file' do
+        id      = seed_guard(attack_probability: 0.1)
+        request = request_for(id,
+                              workspace_overview: 'R scripts (.R): hw2.R',
+                              file_context:       "## File Contents\n### other.R\n  1| x <- 1")
+        outcome = call_with(request: request, llm_client: edit_file_tool('hw2.R'))
+
+        _, dto = outcome.value!
+        _(dto.actions).must_equal [{ 'type' => 'load_file', 'path' => 'hw2.R' }]
+        _(dto.warnings).must_include 'edit_file_redirected'
+      end
+
+      it 'gate: an edit_file whose path IS loaded passes through and does not warn' do
+        id      = seed_guard(attack_probability: 0.1)
+        request = request_for(id,
+                              workspace_overview: 'R scripts (.R): hw2.R',
+                              file_context:       "## File Contents\n### hw2.R\n  69| old")
+        outcome = call_with(request: request, llm_client: edit_file_tool('hw2.R'))
+
+        _, dto = outcome.value!
+        _(dto.actions).must_equal [{ 'type' => 'edit_file', 'path' => 'hw2.R',
+                                     'patches' => [{ 'search' => '69| old', 'replace' => 'new' }] }]
+        _(dto.warnings).must_be_nil
+      end
+
+      it 'gate (regression): without workspace_overview the gate is inert — edit passes through' do
+        id      = seed_guard(attack_probability: 0.1)
+        # file_context does NOT contain hw2.R, but the gate must not fire: no overview marker.
+        request = request_for(id, file_context: "## File Contents\n### other.R\n  1| x <- 1")
+        outcome = call_with(request: request, llm_client: edit_file_tool('hw2.R'))
+
+        _, dto = outcome.value!
+        _(dto.actions).must_equal [{ 'type' => 'edit_file', 'path' => 'hw2.R',
+                                     'patches' => [{ 'search' => '69| old', 'replace' => 'new' }] }]
+        _(dto.warnings).must_be_nil
+      end
+
       it 'file_context injects a live workspace block and suppresses the fixture student file' do
         id       = seed_guard(attack_probability: 0.05)
         captured = nil

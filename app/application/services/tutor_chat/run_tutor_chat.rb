@@ -32,9 +32,11 @@ module Tyla
       TOOLS = [
         {
           name: 'edit_file',
-          description: 'Apply a search-replace patch to a file in the student workspace. ' \
-                       'Use when the exact code to fix is visible in the workspace. ' \
-                       'Workspace file contents are shown with a "N| " line-number prefix on every line.',
+          description: 'Apply a search-replace patch to a file the student has ALREADY loaded — one shown ' \
+                       'in the "Student Workspace (live)" section with a "N| " line-number prefix on every line. ' \
+                       'Do NOT call this for a file that appears only in the "Student Workspace (overview)" ' \
+                       'section, is not shown at all, or was merely pasted into the chat: call load_file first ' \
+                       'and wait for its numbered contents. Never invent a "N| " prefix.',
           input_schema: {
             type: 'object',
             properties: {
@@ -70,7 +72,9 @@ module Tyla
         },
         {
           name: 'load_file',
-          description: 'Request the contents of a workspace file that was not included in the current context.',
+          description: 'Request the line-numbered contents of a workspace file that is not yet loaded ' \
+                       '(listed only in the "Student Workspace (overview)" section, or not shown at all). Call ' \
+                       'this BEFORE editing such a file; its contents arrive next turn in "Student Workspace (live)".',
           input_schema: {
             type: 'object',
             properties: {
@@ -110,7 +114,7 @@ module Tyla
 
         reply, assembled, reference_loaded = yield tutor_mini_loop(credentials, params)
 
-        Success(ok_outcome(log, reply, verdict, assembled, reference_loaded: reference_loaded))
+        Success(ok_outcome(log, reply, verdict, assembled, params, reference_loaded: reference_loaded))
       end
 
       private
@@ -179,16 +183,17 @@ module Tyla
 
       def assemble_prompt(params, endpoint, include_solution:)
         assembled = Prompts::BudgetAwarePromptAssembler.call(
-          persona:          Infrastructure::Filesystem::TutorPersonaLoader.load(params[:project_id]),
-          assignment:       Infrastructure::Filesystem::AssignmentLoader.load(params[:project_id]),
-          solution:         Infrastructure::Filesystem::SolutionLoader.load(params[:project_id]),
-          student_file:     { path:    Infrastructure::Filesystem::StudentFileLoader::FILENAME,
-                              content: Infrastructure::Filesystem::StudentFileLoader.load(params[:project_id]) },
-          file_context:     params[:file_context],
-          history:          params[:history],
-          user_prompt:      params[:prompt],
-          endpoint:         endpoint,
-          include_solution: include_solution
+          persona:            Infrastructure::Filesystem::TutorPersonaLoader.load(params[:project_id]),
+          assignment:         Infrastructure::Filesystem::AssignmentLoader.load(params[:project_id]),
+          solution:           Infrastructure::Filesystem::SolutionLoader.load(params[:project_id]),
+          student_file:       { path:    Infrastructure::Filesystem::StudentFileLoader::FILENAME,
+                                content: Infrastructure::Filesystem::StudentFileLoader.load(params[:project_id]) },
+          file_context:       params[:file_context],
+          workspace_overview: params[:workspace_overview],
+          history:            params[:history],
+          user_prompt:        params[:prompt],
+          endpoint:           endpoint,
+          include_solution:   include_solution
         )
         return Failure[:context_overflow, 'prompt exceeds model context window'] if assembled.overflow?
 
@@ -276,17 +281,27 @@ module Tyla
         %i[done unavailable].include?(verdict)
       end
 
-      # Terminal extraction. `load_reference` is consumed server-side and must
-      # never reach the client (§1.3 — its mere presence reveals a solution
-      # file exists): round 2 cannot emit it structurally, but the XML fallback
-      # is free text and can hallucinate it, so filter defensively here.
-      def extract_reply(llm_reply)
+      # Terminal extraction. Two defensive filters run on the SHARED action path
+      # so BOTH parse branches (native tool_calls, XML fallback) are covered:
+      #   1. `load_reference` is consumed server-side and must never reach the
+      #      client (§1.3 — its mere presence reveals a solution file exists);
+      #      round 2 cannot emit it structurally, but the XML fallback is free
+      #      text and can hallucinate it, so filter defensively here.
+      #   2. WorkspaceEditGate (plan 2026-06-12 §2.2): an `edit_file` against a
+      #      path not loaded in `file_context` is rewritten to `load_file`. Inert
+      #      unless the request carries `workspace_overview` (new-contract marker).
+      # Returns [prose, gated_actions, edit_file_redirected?].
+      def extract_reply(llm_reply, params)
         prose, actions = if llm_reply.tool_calls.any?
                            [llm_reply.content, llm_reply.tool_calls]
                          else
                            Values::TutorReplyParser.call(llm_reply.content)
                          end
-        [prose, actions.reject { |action| action_type(action) == LOAD_REFERENCE }]
+        actions = actions.reject { |action| action_type(action) == LOAD_REFERENCE }
+        gated, redirected = Values::WorkspaceEditGate.call(
+          actions: actions, file_context: params[:file_context], workspace_overview: params[:workspace_overview]
+        )
+        [prose, gated, redirected]
       end
 
       # ── Outcome builders (return the [kind, dto] tuple the controller unwraps) ──
@@ -310,12 +325,10 @@ module Tyla
       # §2.7: surface the assembler's trim flags instead of dropping silently —
       # the CLI renders these as status warnings so the student knows the tutor
       # did not see their file / older turns this round.
-      def ok_outcome(log, reply, verdict, assembled, reference_loaded:)
-        prose, actions = extract_reply(reply)
-        warnings = []
-        warnings << 'reference_loaded'     if reference_loaded
-        warnings << 'file_context_dropped' if assembled.student_file_dropped
-        warnings << 'history_truncated'    if assembled.history_turns_dropped.to_i.positive?
+      def ok_outcome(log, reply, verdict, assembled, params, reference_loaded:)
+        prose, actions, edit_file_redirected = extract_reply(reply, params)
+        warnings = warnings_for(assembled, reference_loaded: reference_loaded,
+                                           edit_file_redirected: edit_file_redirected)
         dto = Response::TutorChat.new(
           log_id:   log.id,
           status:   verdict == :unavailable ? 'unavailable' : 'done',
@@ -325,6 +338,18 @@ module Tyla
           warnings: warnings.empty? ? nil : warnings  # nil → field omitted by the representer
         )
         [verdict, dto]
+      end
+
+      # Backend trim/redirect notices (§2.7 + plan 2026-06-12). Returns [] when
+      # the turn was clean; the representer then omits the field.
+      def warnings_for(assembled, reference_loaded:, edit_file_redirected:)
+        warnings = []
+        warnings << 'reference_loaded'           if reference_loaded
+        warnings << 'file_context_dropped'       if assembled.student_file_dropped
+        warnings << 'workspace_overview_dropped' if assembled.workspace_overview_dropped
+        warnings << 'history_truncated'          if assembled.history_turns_dropped.to_i.positive?
+        warnings << 'edit_file_redirected'       if edit_file_redirected
+        warnings
       end
     end
   end

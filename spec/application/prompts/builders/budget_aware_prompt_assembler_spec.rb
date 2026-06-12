@@ -247,6 +247,93 @@ describe Tyla::Prompts::BudgetAwarePromptAssembler do
     end
   end
 
+  describe 'workspace_overview (file listing) injection' do
+    it 'renders the overview section and suppresses the fixture student file when it fits' do
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:            '',
+        assignment:         '',
+        solution:           '',
+        student_file:       { path: 'Hw2.Rmd', content: 'FIXTURE_STUDENT_FILE_MARKER' },
+        history:            [],
+        user_prompt:        '',
+        endpoint:           GITHUB_ENDPOINT,
+        workspace_overview: 'OVERVIEW_LISTING_MARKER'
+      )
+
+      _(result.overflow?).must_equal false
+      _(result.workspace_overview_dropped).must_equal false
+      _(result.system_prompt).must_include '## Student Workspace (overview)'
+      _(result.system_prompt).must_include 'OVERVIEW_LISTING_MARKER'
+      _(result.system_prompt).wont_include '## Student Workspace Files'
+      _(result.system_prompt).wont_include 'FIXTURE_STUDENT_FILE_MARKER'
+    end
+
+    it 'lets workspace_overview and file_context coexist (both sections, fixture suppressed)' do
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:            '',
+        assignment:         '',
+        solution:           '',
+        student_file:       { path: 'Hw2.Rmd', content: 'FIXTURE_STUDENT_FILE_MARKER' },
+        history:            [],
+        user_prompt:        '',
+        endpoint:           GITHUB_ENDPOINT,
+        file_context:       'LIVE_FILE_CONTEXT_MARKER',
+        workspace_overview: 'OVERVIEW_LISTING_MARKER'
+      )
+
+      _(result.system_prompt).must_include '## Student Workspace (overview)'
+      _(result.system_prompt).must_include 'OVERVIEW_LISTING_MARKER'
+      _(result.system_prompt).must_include '## Student Workspace (live)'
+      _(result.system_prompt).must_include 'LIVE_FILE_CONTEXT_MARKER'
+      _(result.system_prompt).wont_include 'FIXTURE_STUDENT_FILE_MARKER'
+    end
+
+    it 'drops an oversized workspace_overview whole, sets the flag, and frees budget back to history' do
+      # 30_000 chars / 3.5 ≈ 8572 tokens — alone exceeds the 8 K cap, so the
+      # overview is dropped whole. The freed budget then admits the small turn.
+      history = [{ role: 'user', content: 'keep me' }]
+
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:            '',
+        assignment:         '',
+        solution:           '',
+        student_file:       { path: 'x', content: '' },
+        history:            history,
+        user_prompt:        '',
+        endpoint:           GITHUB_ENDPOINT,
+        workspace_overview: 'O' * 30_000
+      )
+
+      _(result.overflow?).must_equal false
+      _(result.workspace_overview_dropped).must_equal true
+      _(result.system_prompt).wont_include '## Student Workspace (overview)'
+      _(result.history.size).must_equal 1
+      _(result.history_turns_dropped).must_equal 0
+    end
+
+    it 'frees a dropped overview budget to file_context (overview drops, live block still fits)' do
+      # Overview is just over the remaining budget on its own; once dropped, the
+      # smaller file_context fits. base = 200 overhead; budget 8000 → remaining 7800.
+      # overview ≈ 7900 tokens (27_650 chars) > 7800 → dropped; file_context small → kept.
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:            '',
+        assignment:         '',
+        solution:           '',
+        student_file:       { path: 'x', content: '' },
+        history:            [],
+        user_prompt:        '',
+        endpoint:           GITHUB_ENDPOINT,
+        file_context:       'LIVE_FILE_CONTEXT_MARKER',
+        workspace_overview: 'O' * 27_650
+      )
+
+      _(result.workspace_overview_dropped).must_equal true
+      _(result.student_file_dropped).must_equal false
+      _(result.system_prompt).wont_include '## Student Workspace (overview)'
+      _(result.system_prompt).must_include 'LIVE_FILE_CONTEXT_MARKER'
+    end
+  end
+
   describe 'composition' do
     it 'renders persona, assignment, solution and student file when include_solution is set' do
       result = Tyla::Prompts::BudgetAwarePromptAssembler.call(

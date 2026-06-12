@@ -54,6 +54,18 @@ describe Tyla::Request::TutorChat do
       _(Tyla::Request::TutorChat.new.call(valid_params)).must_be :success?
     end
 
+    it 'accepts a workspace_overview string and preserves it through to_h' do
+      params = valid_params(workspace_overview: "## Project Context\nR scripts (.R): hw2.R")
+      result = Tyla::Request::TutorChat.new.call(params)
+      _(result).must_be :success?
+      _(result.to_h[:workspace_overview]).must_equal "## Project Context\nR scripts (.R): hw2.R"
+    end
+
+    it 'accepts workspace_overview and file_context together' do
+      params = valid_params(workspace_overview: 'listing', file_context: "### hw2.R\n  1| x")
+      _(Tyla::Request::TutorChat.new.call(params)).must_be :success?
+    end
+
     it 'fails when a history entry is missing role' do
       params = valid_params(history: [{ content: 'no role' }])
       _(Tyla::Request::TutorChat.new.call(params)).wont_be :success?

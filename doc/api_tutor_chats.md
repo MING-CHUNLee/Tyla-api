@@ -84,7 +84,8 @@ POST /api/v1/tutor_chats
 | `guard_log_id` | integer | Required **(NEW, Workstream B)** | The `log_id` returned by the `/guard_checks` pre-call **for this same `prompt`**. The backend verifies it (exists, status ∈ {`done`, `unavailable`}, stored prompt matches) before calling the tutor. Missing → `400`; invalid / `forbidden` / prompt-mismatch → `status: "forbidden"`. |
 | `prompt` | string | Required | The student's message |
 | `history` | array | Optional | Prior chat turns, in order. Each entry is `{ "role": "user" \| "assistant", "content": "..." }`. Capped at 500 KB at the transport layer. The backend then runs a token-budget trim (newest-first) so the assembled prompt fits the LLM channel's input window; oldest turns are silently dropped if needed. |
-| `file_context` | string | Optional | **NEW (Workstream B).** Pre-assembled, token-budgeted plain-text block of the student's workspace, built by the frontend (the backend cannot reach the student's local filesystem). Injected verbatim into the system prompt under `## Student Workspace (live)`. **Line-number convention (2026-06-11):** every line of a text file in this block carries a `N| ` prefix with its real file line number (e.g. `  3| quantile(d123)`); PDF excerpts carry no prefixes. The backend appends a `## Workspace Line Numbers` guide and the `edit_file` tool schema instructs the LLM to copy the prefixes verbatim into `patches[].search` (the frontend's anchoring key) and to omit them in `replace`. See [Composed system prompt](#composed-system-prompt). |
+| `file_context` | string | Optional | **NEW (Workstream B); CONTRACT NARROWED (2026-06-12).** The line-numbered **contents of files the frontend has ALREADY loaded** (e.g. `@`-mentioned, or fetched in response to a `load_file` action) — *not* a project overview (that is now `workspace_overview`). Injected verbatim under `## Student Workspace (live)`. **Line-number convention:** every line of a text file carries a `N| ` prefix with its real file line number (e.g. `  3| quantile(d123)`); PDF excerpts carry no prefixes. **Header convention (now load-bearing — §gate):** each loaded file MUST begin with a `### <relative path>` header line, the path spelled exactly as `workspace_overview` lists it; the backend parses these headers to decide which paths are editable. The backend appends a `## Workspace Line Numbers` guide and the `edit_file` tool schema instructs the LLM to copy the prefixes verbatim into `patches[].search` and omit them in `replace`. See [Composed system prompt](#composed-system-prompt). |
+| `workspace_overview` | string | Optional | **NEW (2026-06-12).** The frontend's workspace **file listing / scan summary** — names only, **no contents, no line numbers**. Injected under `## Student Workspace (overview)`, followed by a `## Loading Workspace Files` guide telling the tutor these files exist but must be `load_file`d before reading/editing (and never to invent `N| ` prefixes). Coexists with `file_context`: the overview lists every workspace file, `file_context` carries the loaded subset. **This field also arms the server-side `edit_file` gate** (see [Workspace edit gate](#workspace-edit-gate)); an older CLI that omits it keeps the pre-2026-06-12 behaviour unchanged. |
 
 ### Example Request
 
@@ -104,9 +105,18 @@ X-LLM-Key: sk-xxxxxxxxxxxx
     { "role": "user",      "content": "What are Sturges, Scott, and FD?" },
     { "role": "assistant", "content": "Hint 1: ..." }
   ],
-  "file_context": "## Project Context\nWorking dir: ...\n## File Contents\n### Hw2.Rmd\n..."
+  "workspace_overview": "## Project Context\nScanned: ...\nR scripts (.R): hw2.R, util.R\n...",
+  "file_context": "## File Contents\n### hw2.R\n  1| rdata <- read.csv(\"d.csv\")\n  2| hist(rdata)\n..."
 }
 ```
+
+> **`workspace_overview` vs `file_context` (2026-06-12).** Send the project scan / file
+> listing in `workspace_overview`; send `file_context` **only** when you have actually
+> loaded line-numbered file contents (an `@`-mention, or in response to a `load_file`
+> action). Each loaded file in `file_context` MUST start with a `### <relative path>`
+> header — the backend's [edit gate](#workspace-edit-gate) reads those headers. Do **not**
+> concatenate the overview into `file_context`; that overloads one field and reintroduces
+> the fabricated-line-number bug this split fixes.
 
 ---
 
@@ -155,7 +165,7 @@ billed by `/guard_checks`; this route no longer calls the guard.
 | `content` | string | The tutor LLM's reply (or Socratic refusal text on `forbidden`) |
 | `actions` | array | **NEW (Workstream B).** Structured suggestions for the TUI to execute behind a human-approval gate. `[]` or omitted when the tutor has no concrete suggestion. **Never present on `forbidden`.** See [Actions](#actions). |
 | `usage` | object \| null | **Tutor-LLM tokens only** (CHANGED). **Σ over all tutor calls this turn** (1 normally, 2 when the reference solution was consulted — CHANGED 2026-06-12). `null` on `forbidden` (no tutor call). Always present on 2xx responses. |
-| `warnings` | string[] | **NEW (2026-06-11, §2.7).** Backend trim notices; **omitted entirely when empty** (older clients unaffected). Values: `"file_context_dropped"` — the live `file_context` did not fit the remaining input budget and was dropped whole (the tutor did not see the student's files this turn); `"history_truncated"` — one or more oldest history turns were dropped by the newest-first trim; `"reference_loaded"` (**NEW 2026-06-12**) — the tutor consulted the instructor's reference solution server-side this turn (informational; the solution content itself is never returned). The CLI surfaces these as status warnings. |
+| `warnings` | string[] | **NEW (2026-06-11, §2.7).** Backend trim/redirect notices; **omitted entirely when empty** (older clients unaffected). Values: `"file_context_dropped"` — the live `file_context` did not fit the remaining input budget and was dropped whole (the tutor did not see the student's loaded files this turn); `"history_truncated"` — one or more oldest history turns were dropped by the newest-first trim; `"reference_loaded"` (**NEW 2026-06-12**) — the tutor consulted the instructor's reference solution server-side this turn (informational; the solution content itself is never returned); `"workspace_overview_dropped"` (**NEW 2026-06-12**) — the `workspace_overview` listing did not fit the input budget and was dropped whole; `"edit_file_redirected"` (**NEW 2026-06-12**) — the tutor asked to `edit_file` a path it had not loaded, so the backend rewrote that action to a `load_file` (see [Workspace edit gate](#workspace-edit-gate)); render it so the extra round-trip is explained, not silent. The CLI surfaces these as status warnings. |
 
 ---
 
@@ -177,6 +187,11 @@ Rules:
 - **`edit_file` uses search-replace patches, never full file content.** The LLM key's
   4000-token output ceiling cannot carry whole files; patches keep each suggestion small.
   `search` strings must be unique enough in the file to be unambiguous.
+- **`edit_file` requires a loaded file.** A file is editable only once its line-numbered
+  contents are in `file_context` (under `## Student Workspace (live)`). If the tutor emits
+  `edit_file` for a path that is only listed in `workspace_overview` (or not shown at all),
+  the backend rewrites that action to `load_file` for the same path — see
+  [Workspace edit gate](#workspace-edit-gate).
 - **`execute_script` is read-only on the frontend** — the TUI runs it through the
   read-only `r_exec` guard (no file writes / package installs). Changing files goes
   through `edit_file` (which gets a diff preview), not `execute_script`.
@@ -191,6 +206,38 @@ Rules:
 `attack_probability` and `evaluation` are still persisted in `prompt_logs`
 and are available via `GET /api/v1/prompt_logs`; they are no longer emitted
 in this response.
+
+---
+
+## Workspace edit gate
+
+**NEW (2026-06-12,
+[`plans/2026-06-12-workspace-context-contract-split.md`](../plans/2026-06-12-workspace-context-contract-split.md) §2.2).**
+The tutor may only edit a file whose line-numbered contents it can actually see. The
+`## Loading Workspace Files` guide and the tightened tool descriptions steer the model, but
+they are soft constraints — some models invent a `N| ` prefix when the student pastes code
+into the chat. So the backend also enforces the rule structurally, on the same shared path
+where `load_reference` is defensively filtered (covering both the native `tool_calls` and
+the XML-fallback parse branches):
+
+- **Loaded-paths set.** Each loaded file in `file_context` begins with a `### <relative path>`
+  header; the backend extracts the editable-path set with a line-anchored match on those
+  headers. **This makes the header part of the wire format, not cosmetics** — a loaded file
+  sent without its header is treated as not loaded.
+- **Gate.** For every `edit_file` whose (normalized) `path` is **not** in the loaded set, the
+  backend drops the patch payload and rewrites the action to `{ "type": "load_file", "path":
+  <same path> }`, deduplicated (one `load_file` per missing path; no duplicate when the reply
+  already contains a `load_file` for it). `warnings` gains `"edit_file_redirected"`.
+  `edit_file`s whose path **is** loaded pass through untouched; other action types are never
+  touched.
+- **Self-healing.** A redirected `load_file` resolves like a model-initiated one: the CLI
+  reads the file, `N| `-prefixes it, re-sends it in `file_context` next turn — where the edit
+  is now legal. Worst case the fabricated edit costs one extra round-trip instead of a silent
+  no-op.
+- **Activation / backward compatibility.** The gate runs **only when the request carries
+  `workspace_overview`** (the new-contract marker). An old CLI that sends the combined blob in
+  `file_context` with no overview never trips it, so v1 `@`-mention edits are byte-identical
+  to the pre-2026-06-12 behaviour. See [Migration order](#migration-order).
 
 ---
 
@@ -341,6 +388,16 @@ sit between the system prompt and the new user message.
 > `file_context` is absent, the fixture WIP is injected as before. The live section
 > participates in the same newest-first token-budget trim.
 
+> **NEW (2026-06-12) — two workspace channels.** `workspace_overview` renders as its own
+> `## Student Workspace (overview)` section (followed by a `## Loading Workspace Files`
+> guide and **no** `## Workspace Line Numbers` guide — the overview has no numbered lines).
+> It **coexists** with `## Student Workspace (live)`: overview = the full file listing,
+> `file_context` = the loaded subset. The fixture `## Student Workspace Files` block is now
+> a Phase-1 fallback rendered **only when the request carries neither field**. Budgeting:
+> `workspace_overview` is the cheapest droppable and is budgeted **first** (before
+> `file_context`, before history); dropping it sets the `workspace_overview_dropped`
+> warning and frees its budget to the slots below.
+
 ### Phase 1 artefact paths
 
 | Role | Path |
@@ -353,6 +410,26 @@ sit between the system prompt and the new user message.
 > Phase 1 reads even the "student WIP" from a fixture; `project_id` is
 > currently ignored by the loaders. Phase 2 will key by `course_id`+`project_id`
 > and accept the student file in the request body.
+
+---
+
+## Migration order
+
+**NEW (2026-06-12).** The `workspace_overview` split is rolled out **backend-first**:
+
+1. **Backend (this repo) — shipped.** Backward compatible: a CLI that still sends the
+   combined project-summary-plus-contents blob in `file_context` (no `workspace_overview`)
+   behaves exactly as before. The `edit_file` gate is **inert** without `workspace_overview`,
+   so v1 `@`-mention edits are unchanged.
+2. **Frontend (MindyCLI) — pending.** The CLI then splits what it sends: the project scan
+   summary moves to `workspace_overview`; `file_context` carries **only** loaded,
+   line-numbered file contents, each prefixed with its `### <relative path>` header (the
+   path spelled exactly as the overview lists it — the gate matches on it). The CLI keeps
+   resolving `load_file` actions by reading the file, prefixing line numbers, and re-sending
+   in `file_context` next turn, and renders the `edit_file_redirected` warning.
+
+Do **not** ship the CLI first: a backend that predates `workspace_overview` would let
+`dry-validation` strip the unknown field, losing the file listing entirely.
 
 ---
 

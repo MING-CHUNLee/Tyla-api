@@ -37,6 +37,58 @@ describe Tyla::Prompts::TutorSystemPrompt do
       _(result).wont_include 'FIXTURE_WIP'
     end
 
+    it 'renders workspace_overview as "## Student Workspace (overview)" + load-file guide, no line-number guide' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: [],
+        workspace_overview: 'R scripts (.R): hw2.R'
+      )
+      _(result).must_include '## Student Workspace (overview)'
+      _(result).must_include 'R scripts (.R): hw2.R'
+      _(result).must_include '## Loading Workspace Files'
+      _(result).must_include 'load_file'
+      _(result).wont_include '## Workspace Line Numbers'
+    end
+
+    it 'lets workspace_overview and live_context coexist (both sections present)' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: [],
+        live_context: '1| x <- 1',
+        workspace_overview: 'R scripts (.R): hw2.R'
+      )
+      _(result).must_include '## Student Workspace (overview)'
+      _(result).must_include '## Student Workspace (live)'
+      _(result).must_include '## Workspace Line Numbers'   # live branch still carries it
+      _(result).must_include '## Loading Workspace Files'  # overview branch guide
+    end
+
+    it 'suppresses the fixture files block when workspace_overview is present (no live_context)' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: [{ path: 'hw.R', content: 'FIXTURE_WIP' }],
+        workspace_overview: 'R scripts (.R): hw.R'
+      )
+      _(result).must_include '## Student Workspace (overview)'
+      _(result).wont_include '## Student Workspace Files'
+      _(result).wont_include 'FIXTURE_WIP'
+    end
+
+    it 'tightens the tool use guide: load_file before editing an unloaded file, never invent line numbers' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: []
+      )
+      guide = result.split('## Tool Use Guide').last
+      _(guide).must_include 'Student Workspace (live)'
+      _(guide).must_include 'load_file'
+      _(guide).must_include 'never guess line numbers'
+    end
+
     it 'appends the line-number guide on the live_context branch' do
       result = Tyla::Prompts::TutorSystemPrompt.build(
         policy_text: 'POLICY',

@@ -18,7 +18,8 @@ module Tyla
           required(:role).filled(:string)
           required(:content).filled(:string)
         end
-        optional(:file_context).filled(:string)    # NEW — optional live-workspace block
+        optional(:file_context).filled(:string)        # live-workspace block: line-numbered LOADED file contents
+        optional(:workspace_overview).filled(:string)   # NEW — frontend's file listing / scan summary (no contents)
       end
 
       rule(:history) do
