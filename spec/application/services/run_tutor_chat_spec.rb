@@ -463,14 +463,15 @@ module Tyla
 
       # ── Workspace edit gate (plan 2026-06-12 §2.2) ───────────────────────────
 
-      def edit_file_tool(path)
+      # `patches` accepts a custom shape so tests can exercise the normalizer
+      # (a model pasting an "N| " prefix into `search`) vs. the clean new shape.
+      def edit_file_tool(path, patches: [{ 'start_line' => 69, 'search' => 'old', 'replace' => 'new' }])
         client = Object.new
         client.define_singleton_method(:send_prompt) do |**_kwargs|
           Infrastructure::LlmResponse.new(
             content:    'Fixing it.',
             usage:      { input_tokens: 10, output_tokens: 5 },
-            tool_calls: [{ 'type' => 'edit_file', 'path' => path,
-                           'patches' => [{ 'search' => '69| old', 'replace' => 'new' }] }]
+            tool_calls: [{ 'type' => 'edit_file', 'path' => path, 'patches' => patches }]
           )
         end
         client.define_singleton_method(:calls) { [] }
@@ -489,7 +490,7 @@ module Tyla
         _(dto.warnings).must_include 'edit_file_redirected'
       end
 
-      it 'gate: an edit_file whose path IS loaded passes through and does not warn' do
+      it 'gate: an edit_file whose path IS loaded passes through (start_line preserved) and does not warn' do
         id      = seed_guard(attack_probability: 0.1)
         request = request_for(id,
                               workspace_overview: 'R scripts (.R): hw2.R',
@@ -498,8 +499,21 @@ module Tyla
 
         _, dto = outcome.value!
         _(dto.actions).must_equal [{ 'type' => 'edit_file', 'path' => 'hw2.R',
-                                     'patches' => [{ 'search' => '69| old', 'replace' => 'new' }] }]
+                                     'patches' => [{ 'start_line' => 69, 'search' => 'old', 'replace' => 'new' }] }]
         _(dto.warnings).must_be_nil
+      end
+
+      it 'normalizer: an "N| " prefix the model pasted into search/replace is stripped on the wire' do
+        id      = seed_guard(attack_probability: 0.1)
+        request = request_for(id,
+                              workspace_overview: 'R scripts (.R): hw2.R',
+                              file_context:       "## File Contents\n### hw2.R\n  69| old")
+        dirty   = [{ 'start_line' => 69, 'search' => '69| old', 'replace' => ' 69| new' }]
+        outcome = call_with(request: request, llm_client: edit_file_tool('hw2.R', patches: dirty))
+
+        _, dto = outcome.value!
+        _(dto.actions).must_equal [{ 'type' => 'edit_file', 'path' => 'hw2.R',
+                                     'patches' => [{ 'start_line' => 69, 'search' => 'old', 'replace' => 'new' }] }]
       end
 
       it 'gate (regression): without workspace_overview the gate is inert — edit passes through' do
@@ -510,7 +524,7 @@ module Tyla
 
         _, dto = outcome.value!
         _(dto.actions).must_equal [{ 'type' => 'edit_file', 'path' => 'hw2.R',
-                                     'patches' => [{ 'search' => '69| old', 'replace' => 'new' }] }]
+                                     'patches' => [{ 'start_line' => 69, 'search' => 'old', 'replace' => 'new' }] }]
         _(dto.warnings).must_be_nil
       end
 

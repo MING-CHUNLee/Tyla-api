@@ -43,7 +43,7 @@ module Tyla
       # handled by the tool_use API — not needed in the prompt.
       TOOL_USE_GUIDE = <<~GUIDE.strip
         ## Tool Use Guide
-        Call `edit_file` ONLY when the target file is shown in the "Student Workspace (live)" section with real "N| " line numbers — copy those prefixes verbatim into `search`, and apply the fix directly without asking first. If the file appears only in the "Student Workspace (overview)" section, is not shown at all, or the student merely pasted code into the chat, call `load_file` FIRST and wait for its numbered contents — never guess line numbers or invent a "N| " prefix.
+        Call `edit_file` ONLY when the target file is shown in the "Student Workspace (live)" section with real "N| " line numbers — set `start_line` to the line number shown and put plain code (no "N| " prefix) in `search`, and apply the fix directly without asking first. If the file appears only in the "Student Workspace (overview)" section, is not shown at all, or the student merely pasted code into the chat, call `load_file` FIRST and wait for its numbered contents — never guess line numbers or invent a "N| " prefix.
         Call `execute_script` when the student asks for a demo, example, or step-by-step illustration — provide the R code directly without asking for confirmation first.
         Call `load_file` when you need a workspace file that is not yet in the "Student Workspace (live)" section (listed only in the overview, or not shown). Its contents arrive next turn; do not edit it before then.
         Call `load_reference` when the question concerns how to approach, structure, improve, or check the homework. Do NOT call it for purely logistical questions (deadlines, submission format).
@@ -68,8 +68,8 @@ module Tyla
       LINE_NUMBER_GUIDE = <<~GUIDE.strip
         ## Workspace Line Numbers
         Every line in the live workspace files is prefixed with its line number ("12| ").
-        - In edit_file `search`, copy the lines verbatim INCLUDING the number prefixes.
-        - In edit_file `replace`, write plain code WITHOUT number prefixes.
+        - In edit_file, set `start_line` to the number shown on the first line you are replacing.
+        - Put plain code (NO "N| " prefixes) in both `search` and `replace`.
         - When quoting code in your explanation to the student, omit the prefixes.
       GUIDE
 

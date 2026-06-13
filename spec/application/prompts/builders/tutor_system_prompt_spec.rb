@@ -89,7 +89,7 @@ describe Tyla::Prompts::TutorSystemPrompt do
       _(guide).must_include 'never guess line numbers'
     end
 
-    it 'appends the line-number guide on the live_context branch' do
+    it 'appends the line-number guide on the live_context branch (start_line, plain code — no in-search prefix)' do
       result = Tyla::Prompts::TutorSystemPrompt.build(
         policy_text: 'POLICY',
         solution_text: '',
@@ -97,7 +97,9 @@ describe Tyla::Prompts::TutorSystemPrompt do
         live_context: '1| x <- 1'
       )
       _(result).must_include '## Workspace Line Numbers'
-      _(result).must_include 'INCLUDING the number prefixes'
+      _(result).must_include 'set `start_line`'
+      _(result).must_include 'plain code'
+      _(result).wont_include 'INCLUDING the number prefixes'
     end
 
     it 'omits the line-number guide on the fixture files branch (no prefixes there)' do

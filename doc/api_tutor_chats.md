@@ -84,7 +84,7 @@ POST /api/v1/tutor_chats
 | `guard_log_id` | integer | Required **(NEW, Workstream B)** | The `log_id` returned by the `/guard_checks` pre-call **for this same `prompt`**. The backend verifies it (exists, status ∈ {`done`, `unavailable`}, stored prompt matches) before calling the tutor. Missing → `400`; invalid / `forbidden` / prompt-mismatch → `status: "forbidden"`. |
 | `prompt` | string | Required | The student's message |
 | `history` | array | Optional | Prior chat turns, in order. Each entry is `{ "role": "user" \| "assistant", "content": "..." }`. Capped at 500 KB at the transport layer. The backend then runs a token-budget trim (newest-first) so the assembled prompt fits the LLM channel's input window; oldest turns are silently dropped if needed. |
-| `file_context` | string | Optional | **NEW (Workstream B); CONTRACT NARROWED (2026-06-12).** The line-numbered **contents of files the frontend has ALREADY loaded** (e.g. `@`-mentioned, or fetched in response to a `load_file` action) — *not* a project overview (that is now `workspace_overview`). Injected verbatim under `## Student Workspace (live)`. **Line-number convention:** every line of a text file carries a `N| ` prefix with its real file line number (e.g. `  3| quantile(d123)`); PDF excerpts carry no prefixes. **Header convention (now load-bearing — §gate):** each loaded file MUST begin with a `### <relative path>` header line, the path spelled exactly as `workspace_overview` lists it; the backend parses these headers to decide which paths are editable. The backend appends a `## Workspace Line Numbers` guide and the `edit_file` tool schema instructs the LLM to copy the prefixes verbatim into `patches[].search` and omit them in `replace`. See [Composed system prompt](#composed-system-prompt). |
+| `file_context` | string | Optional | **NEW (Workstream B); CONTRACT NARROWED (2026-06-12).** The line-numbered **contents of files the frontend has ALREADY loaded** (e.g. `@`-mentioned, or fetched in response to a `load_file` action) — *not* a project overview (that is now `workspace_overview`). Injected verbatim under `## Student Workspace (live)`. **Line-number convention:** every line of a text file carries a `N| ` prefix with its real file line number (e.g. `  3| quantile(d123)`); PDF excerpts carry no prefixes. **Header convention (now load-bearing — §gate):** each loaded file MUST begin with a `### <relative path>` header line, the path spelled exactly as `workspace_overview` lists it; the backend parses these headers to decide which paths are editable. The backend appends a `## Workspace Line Numbers` guide and the `edit_file` tool schema instructs the LLM to read the prefix into `patches[].start_line` (a required 1-based integer) and put **plain code with no prefix** in `search` / `replace` (CHANGED 2026-06-13). See [Composed system prompt](#composed-system-prompt). |
 | `workspace_overview` | string | Optional | **NEW (2026-06-12).** The frontend's workspace **file listing / scan summary** — names only, **no contents, no line numbers**. Injected under `## Student Workspace (overview)`, followed by a `## Loading Workspace Files` guide telling the tutor these files exist but must be `load_file`d before reading/editing (and never to invent `N| ` prefixes). Coexists with `file_context`: the overview lists every workspace file, `file_context` carries the loaded subset. **This field also arms the server-side `edit_file` gate** (see [Workspace edit gate](#workspace-edit-gate)); an older CLI that omits it keeps the pre-2026-06-12 behaviour unchanged. |
 
 ### Example Request
@@ -143,7 +143,7 @@ The guard allowed the prompt and the tutor LLM returned a reply.
   "content": "Step 1: ...\nHint 1: ...",
   "actions": [
     { "type": "edit_file", "path": "hw11.R",
-      "patches": [ { "search": "mean(x)", "replace": "mean(x, na.rm=TRUE)" } ] }
+      "patches": [ { "start_line": 42, "search": "mean(x)", "replace": "mean(x, na.rm=TRUE)" } ] }
   ],
   "usage":   { "input_tokens": 4321, "output_tokens": 512 }
 }
@@ -177,7 +177,7 @@ backend never touches the student's filesystem.
 
 ```
 TutorAction =
-  | { "type": "edit_file";      "path": string; "patches": [ { "search": string, "replace": string } ] }
+  | { "type": "edit_file";      "path": string; "patches": [ { "start_line": integer, "search": string, "replace": string } ] }
   | { "type": "execute_script"; "code": string }
   | { "type": "load_file";      "path": string }
 ```
@@ -186,7 +186,21 @@ Rules:
 
 - **`edit_file` uses search-replace patches, never full file content.** The LLM key's
   4000-token output ceiling cannot carry whole files; patches keep each suggestion small.
-  `search` strings must be unique enough in the file to be unambiguous.
+- **`edit_file` patches anchor by line number, validate by content (CHANGED 2026-06-13,
+  [`plans/2026-06-13-edit-file-line-anchor.md`](../plans/2026-06-13-edit-file-line-anchor.md)).**
+  Each patch is `{ "start_line": integer, "search": string, "replace": string }`:
+  - `start_line` is the **1-based** file line number of the first line of `search` (line 1 =
+    the file's first line), read from the `N| ` prefix the backend shows in
+    `## Student Workspace (live)`. It is a **required** schema field — the model can no longer
+    omit the location the way it routinely dropped the old in-`search` prefix.
+  - `search` / `replace` are **plain code with NO `N| ` prefix** — the file on disk has no such
+    prefix, so plain content matches directly. (The backend defensively strips any `N| ` prefix
+    the model still pastes in, so actions on the wire always carry plain content.)
+  - The frontend applies a patch by reading lines `start_line … start_line + (search line count)
+    − 1` from the live file, comparing them to `search` (line-endings normalized first — files are
+    CRLF), and replacing only on an exact content match; a mismatch is rejected, not silently
+    applied. Line number locates, content guards. `search` should still be unique enough to be
+    unambiguous as a fallback when `start_line` is absent (XML fallback only).
 - **`edit_file` requires a loaded file.** A file is editable only once its line-numbered
   contents are in `file_context` (under `## Student Workspace (live)`). If the tutor emits
   `edit_file` for a path that is only listed in `workspace_overview` (or not shown at all),

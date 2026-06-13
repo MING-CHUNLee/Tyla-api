@@ -34,9 +34,11 @@ module Tyla
           name: 'edit_file',
           description: 'Apply a search-replace patch to a file the student has ALREADY loaded — one shown ' \
                        'in the "Student Workspace (live)" section with a "N| " line-number prefix on every line. ' \
+                       'Set `start_line` to the line number shown on the first line you are replacing, and put ' \
+                       'plain code (no "N| " prefix) in `search` and `replace`. ' \
                        'Do NOT call this for a file that appears only in the "Student Workspace (overview)" ' \
                        'section, is not shown at all, or was merely pasted into the chat: call load_file first ' \
-                       'and wait for its numbered contents. Never invent a "N| " prefix.',
+                       'and wait for its numbered contents. Never invent a "N| " prefix or guess a line number.',
           input_schema: {
             type: 'object',
             properties: {
@@ -46,12 +48,16 @@ module Tyla
                 items: {
                   type: 'object',
                   properties: {
-                    search:  { type: 'string',
-                               description: 'Exact lines to find, copied verbatim INCLUDING the ' \
-                                            'leading "N| " line-number prefixes shown in the workspace context.' },
-                    replace: { type: 'string', description: 'Replacement code WITHOUT line-number prefixes.' }
+                    start_line: { type: 'integer',
+                                  description: '1-based file line number of the first line of `search`, read ' \
+                                               'from the "N| " prefix shown in the workspace context.' },
+                    search:     { type: 'string',
+                                  description: 'The exact lines to find, as plain code WITHOUT the "N| " ' \
+                                               'prefixes — copy the content only; put the line number in ' \
+                                               '`start_line`.' },
+                    replace:    { type: 'string', description: 'Replacement code WITHOUT line-number prefixes.' }
                   },
-                  required: %w[search replace]
+                  required: %w[start_line search replace]
                 }
               }
             },
@@ -281,15 +287,19 @@ module Tyla
         %i[done unavailable].include?(verdict)
       end
 
-      # Terminal extraction. Two defensive filters run on the SHARED action path
-      # so BOTH parse branches (native tool_calls, XML fallback) are covered:
+      # Terminal extraction. Three layers run on the SHARED action path so BOTH
+      # parse branches (native tool_calls, XML fallback) are covered:
       #   1. `load_reference` is consumed server-side and must never reach the
       #      client (§1.3 — its mere presence reveals a solution file exists);
       #      round 2 cannot emit it structurally, but the XML fallback is free
       #      text and can hallucinate it, so filter defensively here.
-      #   2. WorkspaceEditGate (plan 2026-06-12 §2.2): an `edit_file` against a
-      #      path not loaded in `file_context` is rewritten to `load_file`. Inert
-      #      unless the request carries `workspace_overview` (new-contract marker).
+      #   2. EditPatchNormalizer (plan 2026-06-13 §4.3): strips any `N| ` display
+      #      prefix the model pasted into an `edit_file` patch's search/replace,
+      #      so the wire format stays plain code (the line number now lives in the
+      #      required `start_line` field). Hygiene only — no content validation.
+      #   3. apply_gates (below): path gate (plan 2026-06-12 §2.2) then content
+      #      gate (plan 2026-06-13 §4.4 Phase 2) — both rewrite stale edits to
+      #      load_file. The OR of both redirected? flags drives the warning.
       # Returns [prose, gated_actions, edit_file_redirected?].
       def extract_reply(llm_reply, params)
         prose, actions = if llm_reply.tool_calls.any?
@@ -297,11 +307,17 @@ module Tyla
                          else
                            Values::TutorReplyParser.call(llm_reply.content)
                          end
-        actions = actions.reject { |action| action_type(action) == LOAD_REFERENCE }
-        gated, redirected = Values::WorkspaceEditGate.call(
+        actions = Values::EditPatchNormalizer.call(actions.reject { |a| action_type(a) == LOAD_REFERENCE })
+        gated, redirected = apply_gates(actions, params)
+        [prose, gated, redirected]
+      end
+
+      def apply_gates(actions, params)
+        gated, p_redirect = Values::WorkspaceEditGate.call(
           actions: actions, file_context: params[:file_context], workspace_overview: params[:workspace_overview]
         )
-        [prose, gated, redirected]
+        gated, c_redirect = Values::EditPatchContentGate.call(actions: gated, file_context: params[:file_context])
+        [gated, p_redirect || c_redirect]
       end
 
       # ── Outcome builders (return the [kind, dto] tuple the controller unwraps) ──
