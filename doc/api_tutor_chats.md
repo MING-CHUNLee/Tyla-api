@@ -165,7 +165,7 @@ billed by `/guard_checks`; this route no longer calls the guard.
 | `content` | string | The tutor LLM's reply (or Socratic refusal text on `forbidden`) |
 | `actions` | array | **NEW (Workstream B).** Structured suggestions for the TUI to execute behind a human-approval gate. `[]` or omitted when the tutor has no concrete suggestion. **Never present on `forbidden`.** See [Actions](#actions). |
 | `usage` | object \| null | **Tutor-LLM tokens only** (CHANGED). **Σ over all tutor calls this turn** (1 normally, 2 when the reference solution was consulted — CHANGED 2026-06-12). `null` on `forbidden` (no tutor call). Always present on 2xx responses. |
-| `warnings` | string[] | **NEW (2026-06-11, §2.7).** Backend trim/redirect notices; **omitted entirely when empty** (older clients unaffected). Values: `"file_context_dropped"` — the live `file_context` did not fit the remaining input budget and was dropped whole (the tutor did not see the student's loaded files this turn); `"history_truncated"` — one or more oldest history turns were dropped by the newest-first trim; `"reference_loaded"` (**NEW 2026-06-12**) — the tutor consulted the instructor's reference solution server-side this turn (informational; the solution content itself is never returned); `"workspace_overview_dropped"` (**NEW 2026-06-12**) — the `workspace_overview` listing did not fit the input budget and was dropped whole; `"edit_file_redirected"` (**NEW 2026-06-12**) — the tutor asked to `edit_file` a path it had not loaded, so the backend rewrote that action to a `load_file` (see [Workspace edit gate](#workspace-edit-gate)); render it so the extra round-trip is explained, not silent. The CLI surfaces these as status warnings. |
+| `warnings` | string[] | **NEW (2026-06-11, §2.7).** Backend trim/redirect notices; **omitted entirely when empty** (older clients unaffected). Values: `"file_context_dropped"` — the live `file_context` did not fit the remaining input budget and was dropped whole (the tutor did not see the student's loaded files this turn); `"history_truncated"` — one or more oldest history turns were dropped by the newest-first trim; `"reference_loaded"` (**NEW 2026-06-12**) — the tutor consulted the instructor's reference solution server-side this turn (informational; the solution content itself is never returned); `"workspace_overview_dropped"` (**NEW 2026-06-12**) — the `workspace_overview` listing did not fit the input budget and was dropped whole; `"edit_file_redirected"` (**NEW 2026-06-12**) — the tutor asked to `edit_file` a path it had not loaded, so the backend rewrote that action to a `load_file` (see [Workspace edit gate](#workspace-edit-gate)); render it so the extra round-trip is explained, not silent; `"redundant_load_dropped"` (**NEW 2026-06-13**) — the tutor asked to `load_file` a path that is **already** loaded in `file_context` (or duplicated it within one reply), so the backend dropped that action (see [Redundant load gate](#redundant-load-gate)); when this is set and `actions` is now empty, read it as "the backend broke a load loop", not an error. The CLI surfaces these as status warnings. |
 
 ---
 
@@ -252,6 +252,41 @@ the XML-fallback parse branches):
   `workspace_overview`** (the new-contract marker). An old CLI that sends the combined blob in
   `file_context` with no overview never trips it, so v1 `@`-mention edits are byte-identical
   to the pre-2026-06-12 behaviour. See [Migration order](#migration-order).
+
+---
+
+## Redundant load gate
+
+**NEW (2026-06-13,
+[`plans/2026-06-13-load-file-loop.md`](../plans/2026-06-13-load-file-loop.md) §3).** `load_file`
+is **idempotent**: once a file's line-numbered contents are in `file_context`, a further
+`load_file` for it can never be productive. Without a structural stop, a model that re-requests
+an already-loaded file drives an infinite loop — the CLI faithfully re-reads and re-sends, the
+model re-requests again. So the backend drops these on the same shared action path as the other
+gates (covering both `tool_calls` and XML-fallback parses):
+
+- **Already-loaded.** For every `load_file` whose (normalized) `path` is already present in
+  `file_context` — detected by the same line-anchored `### <relative path>` header match the
+  [Workspace edit gate](#workspace-edit-gate) uses — the backend **drops** the action and sets
+  `warnings += "redundant_load_dropped"`.
+- **Intra-reply duplicates.** Two `load_file`s for the same path in one reply collapse to one
+  (also flagged). Other action types are never touched.
+- **Ordering.** This gate runs **before** the workspace-edit and content gates. The content gate
+  legitimately rewrites a stale `edit_file` (already-loaded path, but `search` no longer matches
+  the snapshot) into a `load_file` for that same already-loaded path; that reload is a deliberate
+  self-heal and must survive. Running the redundant-load gate first drops only the model's own
+  redundant loads, then lets the edit gates emit needed reloads.
+- **Activation.** Inert unless `file_context` is non-empty **and** carries at least one `###`
+  header (same trigger as the content gate; **not** bound to `workspace_overview`). Dropping a
+  load for an already-loaded path is correct under both the old combined-blob and new
+  two-channel contracts, so there is no backward-compatibility risk.
+- **Termination caveat.** If `file_context` is budget-trimmed so a loaded file's `### header`
+  is cut, the gate can no longer see it as loaded and the loop returns; the frontend's
+  `load_file` round cap is the backstop there. See
+  [`plans/2026-06-13-load-file-loop.md`](../plans/2026-06-13-load-file-loop.md) §6 D4.
+- **Never a blank turn.** When the gate (or any gate) clears every action and the model gave no
+  prose, the backend injects a short fallback message, so a `done` turn is never `content`-empty
+  with `actions: []` (plan §2 decision E).
 
 ---
 
@@ -440,7 +475,12 @@ sit between the system prompt and the new user message.
    line-numbered file contents, each prefixed with its `### <relative path>` header (the
    path spelled exactly as the overview lists it — the gate matches on it). The CLI keeps
    resolving `load_file` actions by reading the file, prefixing line numbers, and re-sending
-   in `file_context` next turn, and renders the `edit_file_redirected` warning.
+   in `file_context` next turn, and renders the `edit_file_redirected` warning. Two hygiene
+   measures pair with the [Redundant load gate](#redundant-load-gate) (plan 2026-06-13 §5):
+   (a) **dedupe** `file_context` so each loaded path appears once — including `@`-mention
+   paths in the dedup set — and (b) cap the `load_file` resolve loop at a fixed number of
+   rounds (the structural backstop when a budget-trimmed `### header` slips past the backend
+   gate), surfacing `redundant_load_dropped` to converge early.
 
 Do **not** ship the CLI first: a backend that predates `workspace_overview` would let
 `dry-validation` strip the unknown field, losing the file listing entirely.

@@ -51,13 +51,19 @@ module Tyla
         If you have no concrete code to act on, or when refusing, do not call any tool.
       GUIDE
 
-      # Appended ONLY on the `workspace_overview` branch (plan 2026-06-12 §2).
-      # The overview lists files whose contents are NOT loaded, so it must NOT
-      # carry the line-number promise — instead it steers the model to load_file.
+      # Appended ONLY on the `workspace_overview` branch (plan 2026-06-12 §2,
+      # rewritten 2026-06-13 §4.3). The overview and the live section can overlap:
+      # a file listed in the overview may ALSO already be loaded in the live section.
+      # So the guide must NOT claim the overview's files are uniformly unloaded —
+      # that lie made the model re-`load_file` a file already in the live section
+      # (the load_file loop). Instead, the live section is the source of truth: use
+      # already-loaded files directly, only `load_file` what is not yet live.
       WORKSPACE_OVERVIEW_GUIDE = <<~GUIDE.strip
         ## Loading Workspace Files
-        The files listed above exist in the student's workspace but their contents are NOT loaded.
-        - To read or edit any of them, call `load_file` with its path FIRST; the numbered contents arrive next turn in the "Student Workspace (live)" section.
+        The files listed in the overview exist in the student's workspace; some may already be loaded.
+        The "Student Workspace (live)" section is the source of truth for what is currently loaded.
+        - If a file you need is ALREADY shown in the "Student Workspace (live)" section, use it directly — do NOT call `load_file` for it again.
+        - Only call `load_file` for a file that is NOT yet in the "Student Workspace (live)" section; its numbered contents arrive next turn.
         - Only files shown in the "Student Workspace (live)" section carry real line numbers. Never invent or guess a "N| " line-number prefix for a file that is not loaded — not even if the student pasted some of its lines into the chat.
         - Do NOT emit `edit_file` for a file that is not in the "Student Workspace (live)" section; `load_file` it first.
       GUIDE

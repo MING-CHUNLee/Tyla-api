@@ -545,6 +545,101 @@ module Tyla
         _(prompt).must_include 'LIVE_WORKSPACE_FROM_FRONTEND'
         _(prompt).wont_include '## Student Workspace Files'
       end
+
+      # ── Redundant load gate (plan 2026-06-13 §3/§4.4) ────────────────────────
+
+      # A client that emits a fixed `content` + `tool_calls` list, for driving the
+      # gate chain with arbitrary action shapes.
+      def tool_calls_llm(content:, tool_calls:)
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          Infrastructure::LlmResponse.new(
+            content: content, usage: { input_tokens: 10, output_tokens: 5 }, tool_calls: tool_calls
+          )
+        end
+        client.define_singleton_method(:calls) { [] }
+        client
+      end
+
+      it 'redundant-load gate: a load_file for an already-loaded path is dropped and warns' do
+        id      = seed_guard(attack_probability: 0.1)
+        request = request_for(id, file_context: "## File Contents\n### hw2.R\n  1| x <- 1")
+        client  = tool_calls_llm(content: 'Loading.', tool_calls: [{ 'type' => 'load_file', 'path' => 'hw2.R' }])
+        outcome = call_with(request: request, llm_client: client)
+
+        _, dto = outcome.value!
+        _(dto.actions).must_equal []
+        _(dto.warnings).must_include 'redundant_load_dropped'
+      end
+
+      it 'redundant-load gate: a load_file for an UNLOADED path survives even when the gate is active' do
+        id      = seed_guard(attack_probability: 0.1)
+        request = request_for(id, file_context: "## File Contents\n### hw2.R\n  1| x <- 1")
+        client  = tool_calls_llm(content: 'Loading.', tool_calls: [{ 'type' => 'load_file', 'path' => 'hw3.R' }])
+        outcome = call_with(request: request, llm_client: client)
+
+        _, dto = outcome.value!
+        _(dto.actions).must_equal [{ 'type' => 'load_file', 'path' => 'hw3.R' }]
+        _(dto.warnings).must_be_nil
+      end
+
+      it 'cross-gate ordering: content gate reload for a stale already-loaded edit survives the load gate' do
+        id      = seed_guard(attack_probability: 0.1)
+        # hw2.R IS loaded, but the edit's search content does NOT match the snapshot →
+        # EditPatchContentGate rewrites it to load_file hw2.R. That reload is legitimate
+        # and must survive: it is produced AFTER RedundantLoadGate already ran. If the
+        # redundant-load gate ran last, it would wrongly drop this (path already loaded).
+        request = request_for(id, file_context: "## File Contents\n### hw2.R\n  1| x <- 1")
+        stale   = [{ 'start_line' => 1, 'search' => 'WRONG CONTENT', 'replace' => 'x <- 99' }]
+        client  = tool_calls_llm(content: 'Fixing.',
+                                 tool_calls: [{ 'type' => 'edit_file', 'path' => 'hw2.R', 'patches' => stale }])
+        outcome = call_with(request: request, llm_client: client)
+
+        _, dto = outcome.value!
+        _(dto.actions).must_equal [{ 'type' => 'load_file', 'path' => 'hw2.R' }]
+        _(dto.warnings).must_include 'edit_file_redirected'
+        _(dto.warnings).wont_include 'redundant_load_dropped'   # the model emitted no redundant load
+      end
+
+      it 'redundant-load gate: drops only the loaded path in a mixed reply, keeps the unloaded one' do
+        id      = seed_guard(attack_probability: 0.1)
+        request = request_for(id, file_context: "## File Contents\n### hw2.R\n  1| x <- 1")
+        client  = tool_calls_llm(content: 'Loading two.',
+                                 tool_calls: [{ 'type' => 'load_file', 'path' => 'hw2.R' },
+                                              { 'type' => 'load_file', 'path' => 'Hw2.Rmd' }])
+        outcome = call_with(request: request, llm_client: client)
+
+        _, dto = outcome.value!
+        _(dto.actions).must_equal [{ 'type' => 'load_file', 'path' => 'Hw2.Rmd' }]
+        _(dto.warnings).must_include 'redundant_load_dropped'
+      end
+
+      # ── Decision E: no empty content + empty actions turn (plan 2026-06-13 §2/§6 D1) ──
+
+      it 'decision E: a reply with only redundant loads and no prose yields fallback prose, never blank' do
+        id      = seed_guard(attack_probability: 0.1)
+        request = request_for(id, file_context: "## File Contents\n### hw2.R\n  1| x <- 1")
+        # The trigger case: the model re-loads an already-loaded file and gives no prose.
+        client  = tool_calls_llm(content: '', tool_calls: [{ 'type' => 'load_file', 'path' => 'hw2.R' }])
+        outcome = call_with(request: request, llm_client: client)
+
+        _, dto = outcome.value!
+        _(dto.actions).must_equal []
+        refute(dto.content.nil? || dto.content.strip.empty?)   # never content-empty + actions-empty
+        _(dto.warnings).must_include 'redundant_load_dropped'
+      end
+
+      it 'decision E: leaves real prose untouched when actions are cleared' do
+        id      = seed_guard(attack_probability: 0.1)
+        request = request_for(id, file_context: "## File Contents\n### hw2.R\n  1| x <- 1")
+        client  = tool_calls_llm(content: 'Here is the explanation.',
+                                 tool_calls: [{ 'type' => 'load_file', 'path' => 'hw2.R' }])
+        outcome = call_with(request: request, llm_client: client)
+
+        _, dto = outcome.value!
+        _(dto.actions).must_equal []
+        _(dto.content).must_equal 'Here is the explanation.'   # genuine prose preserved
+      end
     end
   end
 end

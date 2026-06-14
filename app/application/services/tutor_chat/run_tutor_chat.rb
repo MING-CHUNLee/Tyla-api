@@ -29,6 +29,14 @@ module Tyla
 
       LOAD_REFERENCE = 'load_reference'
 
+      # Decision E (plan 2026-06-13 §2/§6 D1): the trigger case (round 2's two
+      # redundant load_file actions both dropped) leaves actions=[]; if the model
+      # also emitted no prose, the student would get a blank turn. The backend
+      # guarantees the worst case is a gentle nudge, never an empty content + empty
+      # actions response.
+      FALLBACK_PROSE = "I couldn't act on that automatically this time. Could you re-share " \
+                       'the file you want me to look at, or rephrase what you would like help with?'
+
       TOOLS = [
         {
           name: 'edit_file',
@@ -256,6 +264,10 @@ module Tyla
         action['type'] || action[:type]
       end
 
+      def blank_text?(text)
+        text.nil? || text.to_s.strip.empty?
+      end
+
       def sum_usage(first, second)
         {
           input_tokens:  usage_count(first, :input_tokens) + usage_count(second, :input_tokens),
@@ -297,10 +309,12 @@ module Tyla
       #      prefix the model pasted into an `edit_file` patch's search/replace,
       #      so the wire format stays plain code (the line number now lives in the
       #      required `start_line` field). Hygiene only — no content validation.
-      #   3. apply_gates (below): path gate (plan 2026-06-12 §2.2) then content
-      #      gate (plan 2026-06-13 §4.4 Phase 2) — both rewrite stale edits to
-      #      load_file. The OR of both redirected? flags drives the warning.
-      # Returns [prose, gated_actions, edit_file_redirected?].
+      #   3. apply_gates (below): redundant-load gate (plan 2026-06-13 §3) then path
+      #      gate (plan 2026-06-12 §2.2) then content gate (plan 2026-06-13 §4.4
+      #      Phase 2) — the path/content gates rewrite stale edits to load_file. The
+      #      OR of both redirected? flags drives `edit_file_redirected`; the
+      #      redundant-load gate's dropped? flag is a SEPARATE 4th value.
+      # Returns [prose, gated_actions, edit_file_redirected?, redundant_load_dropped?].
       def extract_reply(llm_reply, params)
         prose, actions = if llm_reply.tool_calls.any?
                            [llm_reply.content, llm_reply.tool_calls]
@@ -308,16 +322,24 @@ module Tyla
                            Values::TutorReplyParser.call(llm_reply.content)
                          end
         actions = Values::EditPatchNormalizer.call(actions.reject { |a| action_type(a) == LOAD_REFERENCE })
-        gated, redirected = apply_gates(actions, params)
-        [prose, gated, redirected]
+        gated, redirected, load_dropped = apply_gates(actions, params)
+        [prose, gated, redirected, load_dropped]
       end
 
+      # RedundantLoadGate runs FIRST (plan 2026-06-13 §3): it drops the model's own
+      # redundant load_file actions (path already in file_context) before the edit
+      # gates run. Critically, it must precede EditPatchContentGate, which legitimately
+      # rewrites stale edits into load_file for already-loaded paths — running the
+      # redundant-load gate after would kill that self-healing reload.
       def apply_gates(actions, params)
+        gated, l_dropped = Values::RedundantLoadGate.call(
+          actions: actions, file_context: params[:file_context]
+        )
         gated, p_redirect = Values::WorkspaceEditGate.call(
-          actions: actions, file_context: params[:file_context], workspace_overview: params[:workspace_overview]
+          actions: gated, file_context: params[:file_context], workspace_overview: params[:workspace_overview]
         )
         gated, c_redirect = Values::EditPatchContentGate.call(actions: gated, file_context: params[:file_context])
-        [gated, p_redirect || c_redirect]
+        [gated, p_redirect || c_redirect, l_dropped]
       end
 
       # ── Outcome builders (return the [kind, dto] tuple the controller unwraps) ──
@@ -342,9 +364,13 @@ module Tyla
       # the CLI renders these as status warnings so the student knows the tutor
       # did not see their file / older turns this round.
       def ok_outcome(log, reply, verdict, assembled, params, reference_loaded:)
-        prose, actions, edit_file_redirected = extract_reply(reply, params)
+        prose, actions, edit_file_redirected, redundant_load_dropped = extract_reply(reply, params)
+        # Decision E: never ship an empty content + empty actions turn (§6 D1). When
+        # the gates cleared every action and the model gave no prose, inject a nudge.
+        prose = FALLBACK_PROSE if blank_text?(prose) && actions.empty?
         warnings = warnings_for(assembled, reference_loaded: reference_loaded,
-                                           edit_file_redirected: edit_file_redirected)
+                                           edit_file_redirected: edit_file_redirected,
+                                           redundant_load_dropped: redundant_load_dropped)
         dto = Response::TutorChat.new(
           log_id:   log.id,
           status:   verdict == :unavailable ? 'unavailable' : 'done',
@@ -356,15 +382,20 @@ module Tyla
         [verdict, dto]
       end
 
-      # Backend trim/redirect notices (§2.7 + plan 2026-06-12). Returns [] when
-      # the turn was clean; the representer then omits the field.
-      def warnings_for(assembled, reference_loaded:, edit_file_redirected:)
+      # Backend trim/redirect notices (§2.7 + plan 2026-06-12 / 2026-06-13). Returns
+      # [] when the turn was clean; the representer then omits the field.
+      # `redundant_load_dropped` is a SEPARATE flag from `edit_file_redirected`
+      # (plan 2026-06-13 §4.2): it signals the backend caught the model re-loading an
+      # already-loaded file, so the frontend reads cleared actions as "loop broken"
+      # rather than an error — and it doubles as the Phase 0 loop-rate measurement.
+      def warnings_for(assembled, reference_loaded:, edit_file_redirected:, redundant_load_dropped:)
         warnings = []
         warnings << 'reference_loaded'           if reference_loaded
         warnings << 'file_context_dropped'       if assembled.student_file_dropped
         warnings << 'workspace_overview_dropped' if assembled.workspace_overview_dropped
         warnings << 'history_truncated'          if assembled.history_turns_dropped.to_i.positive?
         warnings << 'edit_file_redirected'       if edit_file_redirected
+        warnings << 'redundant_load_dropped'     if redundant_load_dropped
         warnings
       end
     end

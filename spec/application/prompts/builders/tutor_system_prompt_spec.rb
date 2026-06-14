@@ -51,6 +51,23 @@ describe Tyla::Prompts::TutorSystemPrompt do
       _(result).wont_include '## Workspace Line Numbers'
     end
 
+    it 'overview guide (B): steers to use already-live files directly, drops the "NOT loaded" lie' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: [],
+        workspace_overview: 'R scripts (.R): hw2.R'
+      )
+      guide = result.split('## Loading Workspace Files').last
+      _(guide).must_include 'source of truth'
+      _(guide).must_include 'use it directly'
+      _(guide).must_include 'do NOT call `load_file` for it again'
+      _(guide).wont_include 'their contents are NOT loaded'   # the lie that drove the load_file loop
+      # Existing safeguards must survive the rewrite.
+      _(guide).must_include 'Never invent or guess a "N| "'
+      _(guide).must_include 'load_file' # still steers loading for not-yet-live files
+    end
+
     it 'lets workspace_overview and live_context coexist (both sections present)' do
       result = Tyla::Prompts::TutorSystemPrompt.build(
         policy_text: 'POLICY',

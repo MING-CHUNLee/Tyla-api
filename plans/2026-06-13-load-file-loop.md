@@ -28,9 +28,23 @@ the skewness of d123 in Question 1 of Hw2.Rmd.
 
 round 2 兩個檔案明明都在 `file_context` 裡了，模型卻回了一模一樣的兩個 `load_file`。前端讀檔→重送→模型重請求→∞。**這就是「爆掉」。**
 
-對照：這條迴圈是**前端驅動**的（`doc/api_tutor_chats.md:442`「The CLI keeps resolving `load_file` actions … and re-sending」）。後端唯一的 loop guard（`run_tutor_chat.rb` `tutor_mini_loop`）只管 `load_reference`、兩輪結構性終止；**`load_file` 這條前後端都沒有 cap**。
+對照：這條迴圈是**前端驅動**的（`doc/api_tutor_chats.md:442`「The CLI keeps resolving `load_file` actions … and re-sending」）。後端唯一的 loop guard（`run_tutor_chat.rb` `tutor_mini_loop`）只管 `load_reference`、兩輪結構性終止；**後端對 `load_file` 無 cap**（前端有 `MAX_CONTINUATIONS = 3` + `resolved` dedup，但 dedup 不涵蓋 @-mention 帶入的 `baseFileContext`，見 §0 末 Step 0 結果）。
 
 附帶觀察到的髒資料：round 2 的 `hw2.R` 同時出現在 `## File Contents` 和 `## Files Loaded On Request` 兩段（前端 append 沒去重）。不是迴圈主因，但放大了 token 浪費也增加模型混淆面。
+
+### Step 0 結果（2026-06-13 已確認）
+
+撈 MindyCLI `execute-tutor-use-case.ts`（`buildContext()`）確認：`file_scan` 無條件執行，掃描結果填入 `workspaceOverview` 並以 `workspaceOverview || undefined` 隨每次請求送出。**觸發當下 `workspace_overview` 確認在場**（`file_scan` 非空即送）。
+
+結論：
+- **§1.1 矛盾確實成立**：`WORKSPACE_OVERVIEW_GUIDE` 在 round 1、2 均有 render，「contents are NOT loaded → call `load_file` FIRST」與 live 區已載入的兩檔並存於同一 system prompt。
+- **B（prompt 改寫）IS 相關**，應與 A 同波上線（見 §8 調整）。
+- **§6 D1 空轉嚴重度**：普通（§1.1 矛盾 + §1.2 無 gate 共同作用，非最尖銳的「無 overview」情境）。
+
+附帶觀察（影響 §8 C/D 優先排序）：
+- 前端已存在部分終止保護：`resolved.has(r.key)` 去重（迴圈內已 resolved 的 path 不再 set `madeProgress`）+ `MAX_CONTINUATIONS = 3` hard cap。觸發 scenario 下前端在 round 2 API call 後即結束（`madeProgress = false`），並非真正無限轉，而是浪費 2 次 LLM call、無有效修改。
+- **`resolved` 只追蹤 `loadedBlocks`，不涵蓋 `baseFileContext`（@-mention）**：`hw2.R` 因 @-mention 已在 `baseFileContext`，round 1 仍被重複 append 進 `loadedBlocks`（→ 重複 `### hw2.R`）。**C 的核心修法：把 @-mention 路徑也納入去重集合**，使模型在 live 區看到單一、完整的 `### hw2.R`（同時直接降低「巢狀標題讓模型認不出已載入」的混淆，§1.1 C 重新定位）。
+- **D 剩餘工作小**：`MAX_CONTINUATIONS` 已存在；剩餘是確保 @-mention 路徑也納入 `resolved`（防 content gate reload 在 @-mention 檔上成環），具體 landing 見 §8 step 6 調整。
 
 ---
 
@@ -238,13 +252,13 @@ The "Student Workspace (live)" section is the source of truth for what is curren
 
 | # | 內容 | 依賴 |
 |---|---|---|
-| 0 | （前置）撈觸發 log 確認當下 `workspace_overview` 是否在場（決定 B 是否相關、空轉風險嚴重度，§1.1） | 無 |
+| 0 | ✅ **完成**：`workspace_overview` 確認在場；§1.1 成立；B IS 相關；空轉普通嚴重度。詳見 §0 末「Step 0 結果」 | 無 |
 | 1 | `app/domain/values/redundant_load_gate.rb` + `spec/domain/values/redundant_load_gate_spec.rb`（純 unit，先綠）；順手抽 `loaded_paths` 共用 helper（§4.1） | 無 |
 | 2 | `run_tutor_chat.rb`：`apply_gates` 串入 gate（**排最前**，§3）、`extract_reply`/`ok_outcome`/`warnings_for` 接 `redundant_load_dropped`（**四值接線**，§4.2）；+ 整合 spec（含**跨 gate 排序回歸**，§4.4） | 1 |
 | 3 | **（決策 E，Phase 1）** `run_tutor_chat.rb`：`ok_outcome` 在「actions 清空且 prose 空」時注入 fallback prose／保留 round-1 prose；+ spec | 2 |
-| 4 | `tutor_system_prompt.rb`：`WORKSPACE_OVERVIEW_GUIDE` 改寫（+ spec 新斷言） | 無（可與 1–3 併） |
+| 4 | `tutor_system_prompt.rb`：`WORKSPACE_OVERVIEW_GUIDE` 改寫（+ spec 新斷言）——**step 0 確認必要；與 1–2 同波** | 無 |
 | 5 | `doc/api_tutor_chats.md`：補「`load_file` 冪等／已載入即丟」與 `redundant_load_dropped` warning；Actions/Workspace 段同步 | 1–4 |
-| 6 | （跨 repo）MindyCLI：`file_context` append 去重（理想上合併單一 loaded 段）+ load_file round cap——**與後端靠近上線（§7），非從容跟進** | 1–5 上線後 |
+| 6 | （跨 repo）MindyCLI：**C 優先**（@-mention 路徑納入去重集合 + 合併單一 loaded 段；解巢狀標題混淆，§1.1 C 重新定位）；**D 剩餘工作小**（`MAX_CONTINUATIONS` 已存在，補 @-mention 路徑進 `resolved` 即可）——**與後端靠近上線（§7）** | 1–5 上線後 |
 
 ---
 
@@ -256,7 +270,7 @@ The "Student Workspace (live)" section is the source of truth for what is curren
 - [ ] `apply_gates` 中 `RedundantLoadGate` 在 `WorkspaceEditGate` 之前，且不誤殺後者改寫出的 load_file（未載入 path）
 - [ ] **`RedundantLoadGate` 在 `EditPatchContentGate` 之前；content gate 對「已載入 path content mismatch」產出的 `load_file` 仍存活到 actions（跨 gate 排序回歸，§4.4）**
 - [ ] **（決策 E）模型只回冗餘 load、gate 清空後：`dto.content` 非空，永不出現 `content` 空＋`actions: []`**
-- [ ] **（§8 step 0）已確認 trigger 當下 `workspace_overview` 是否在場，B 的相關性結論已記錄**
+- [x] **（§8 step 0）已確認 trigger 當下 `workspace_overview` 是否在場，B 的相關性結論已記錄**（`workspace_overview` 確認在場；§1.1 成立；B IS 相關）
 - [ ] 冗餘 load 被丟時 `dto.warnings` 含 `redundant_load_dropped`；乾淨回合不含
 - [ ] `WORKSPACE_OVERVIEW_GUIDE` 不再含「their contents are NOT loaded」；含「已在 live 直接用、別再 load」措辭；既有防呆句（never invent prefix / load_file before edit）保留
 - [ ] 既有 spec 全綠（`tutor_system_prompt_spec` :40-66、`run_tutor_chat_spec` gate/normalizer 段）
