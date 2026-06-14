@@ -334,6 +334,51 @@ describe Tyla::Prompts::BudgetAwarePromptAssembler do
     end
   end
 
+  describe 'strip_section_headings: ## headings removed, ### path and line-prefixed ## preserved' do
+    def call_with_file_context(raw)
+      Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:      '',
+        assignment:   '',
+        solution:     '',
+        student_file: { path: 'x', content: '' },
+        history:      [],
+        user_prompt:  '',
+        endpoint:     GITHUB_ENDPOINT,
+        file_context: raw
+      )
+    end
+
+    it 'removes ## Files Loaded On Request heading from live_context' do
+      fc = "## Files Loaded On Request\n### hw2.R\n 1| x <- 1\n### Hw2.Rmd\n  1| ---\n"
+      result = call_with_file_context(fc)
+      _(result.system_prompt).must_include '### hw2.R'
+      _(result.system_prompt).must_include '### Hw2.Rmd'
+      _(result.system_prompt).wont_include '## Files Loaded On Request'
+    end
+
+    it 'removes multiple ## headings (## File Contents + ## Files Loaded On Request)' do
+      fc = "## File Contents\n### hw2.R\n 1| x <- 1\n## Files Loaded On Request\n### Hw2.Rmd\n  1| ---\n"
+      result = call_with_file_context(fc)
+      _(result.system_prompt).wont_include '## File Contents'
+      _(result.system_prompt).wont_include '## Files Loaded On Request'
+      _(result.system_prompt).must_include '### hw2.R'
+      _(result.system_prompt).must_include '### Hw2.Rmd'
+    end
+
+    it 'passes through file_context unchanged when it has no ## headings (regression)' do
+      fc = "### hw2.R\n 1| x <- 1\n  2| y <- 2\n"
+      result = call_with_file_context(fc)
+      _(result.system_prompt).must_include '### hw2.R'
+      _(result.system_prompt).must_include ' 1| x <- 1'
+    end
+
+    it 'preserves line-prefixed ## content such as " 1| ## Question 2"' do
+      fc = "### Hw2.Rmd\n  1| ## Question 2\n  2| x <- 1\n"
+      result = call_with_file_context(fc)
+      _(result.system_prompt).must_include '  1| ## Question 2'
+    end
+  end
+
   describe 'composition' do
     it 'renders persona, assignment, solution and student file when include_solution is set' do
       result = Tyla::Prompts::BudgetAwarePromptAssembler.call(

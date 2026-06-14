@@ -322,6 +322,7 @@ module Tyla
                            Values::TutorReplyParser.call(llm_reply.content)
                          end
         actions = Values::EditPatchNormalizer.call(actions.reject { |a| action_type(a) == LOAD_REFERENCE })
+        warn "[tutor_chat.extract_reply] pre_gate_actions=#{actions.map { |a| action_type(a) }.inspect}"
         gated, redirected, load_dropped = apply_gates(actions, params)
         [prose, gated, redirected, load_dropped]
       end

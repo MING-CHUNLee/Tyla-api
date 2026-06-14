@@ -86,7 +86,7 @@ module Tyla
         if !file_context.nil? && !file_context.empty?
           fc_tokens = Values::Tokenizer.estimate(file_context)
           if fc_tokens <= remaining
-            live_context = file_context
+            live_context = strip_section_headings(file_context)
             remaining   -= fc_tokens
           else
             workspace_dropped = true   # dropped whole; freed budget flows to history
@@ -147,6 +147,15 @@ module Tyla
         [selected, turns.size - kept]
       end
       private_class_method :trim_history
+
+      # Strip `## ` section headings from file_context before injection so they
+      # don't become sibling headings to `## Student Workspace (live)`, making the
+      # live section appear empty to the model. Preserves `### path` file headers
+      # and line-prefixed `## ` content (e.g. ` 1| ## Question 2`).
+      def self.strip_section_headings(raw)
+        raw.to_s.lines.grep_v(/\A##[^#]/).join
+      end
+      private_class_method :strip_section_headings
     end
   end
 end

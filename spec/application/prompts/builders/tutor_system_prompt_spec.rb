@@ -68,6 +68,18 @@ describe Tyla::Prompts::TutorSystemPrompt do
       _(guide).must_include 'load_file' # still steers loading for not-yet-live files
     end
 
+    it 'overview guide includes ### path semantic: loaded = ### filename + numbered lines' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: [],
+        workspace_overview: 'R scripts (.R): hw2.R'
+      )
+      guide = result.split('## Loading Workspace Files').last
+      _(guide).must_include '### filename'
+      _(guide).must_include '1| ...'
+    end
+
     it 'lets workspace_overview and live_context coexist (both sections present)' do
       result = Tyla::Prompts::TutorSystemPrompt.build(
         policy_text: 'POLICY',

@@ -62,6 +62,7 @@ module Tyla
         ## Loading Workspace Files
         The files listed in the overview exist in the student's workspace; some may already be loaded.
         The "Student Workspace (live)" section is the source of truth for what is currently loaded.
+        A file is loaded when its `### filename` header followed by numbered lines (e.g., `1| ...`) appears in the "Student Workspace (live)" section.
         - If a file you need is ALREADY shown in the "Student Workspace (live)" section, use it directly — do NOT call `load_file` for it again.
         - Only call `load_file` for a file that is NOT yet in the "Student Workspace (live)" section; its numbered contents arrive next turn.
         - Only files shown in the "Student Workspace (live)" section carry real line numbers. Never invent or guess a "N| " line-number prefix for a file that is not loaded — not even if the student pasted some of its lines into the chat.
