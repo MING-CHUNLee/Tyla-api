@@ -79,4 +79,69 @@ describe Tyla::Request::TutorChat do
       _(result.errors.to_h).must_include :history
     end
   end
+
+  describe 'session_turns (Option C)' do
+    it 'accepts a well-formed session_turns array' do
+      params = valid_params(session_turns: [
+                              {
+                                prompt:          'How do I read the CSV?',
+                                prose:           'Use read.csv with the right path.',
+                                context_headers: "### hw2.R\n",
+                                actions:         [{ type: 'load_file', path: 'hw2.R' }]
+                              }
+                            ])
+      _(Tyla::Request::TutorChat.new.call(params)).must_be :success?
+    end
+
+    it 'accepts a session_turn with only the required prompt' do
+      params = valid_params(session_turns: [{ prompt: 'just an intent' }])
+      _(Tyla::Request::TutorChat.new.call(params)).must_be :success?
+    end
+
+    it 'preserves session_turns through to_h' do
+      turn   = { prompt: 'hi', prose: 'hello' }
+      result = Tyla::Request::TutorChat.new.call(valid_params(session_turns: [turn]))
+      _(result).must_be :success?
+      _(result.to_h[:session_turns].first[:prompt]).must_equal 'hi'
+    end
+
+    it 'fails when a session_turn is missing prompt' do
+      params = valid_params(session_turns: [{ prose: 'no prompt here' }])
+      _(Tyla::Request::TutorChat.new.call(params)).wont_be :success?
+    end
+
+    it 'fails when a session_turn prompt is blank' do
+      params = valid_params(session_turns: [{ prompt: '' }])
+      _(Tyla::Request::TutorChat.new.call(params)).wont_be :success?
+    end
+
+    it 'fails when actions is not an array of hashes' do
+      params = valid_params(session_turns: [{ prompt: 'p', actions: ['not-a-hash'] }])
+      _(Tyla::Request::TutorChat.new.call(params)).wont_be :success?
+    end
+
+    it 'fails when session_turns exceeds the 500 KB limit' do
+      big   = 'x' * 100
+      turns = Array.new(6000) { { prompt: big } }
+      result = Tyla::Request::TutorChat.new.call(valid_params(session_turns: turns))
+      _(result).wont_be :success?
+      _(result.errors.to_h).must_include :session_turns
+    end
+
+    it 'still accepts a legacy history-only request (backward compatible)' do
+      params = valid_params(history: [
+                              { role: 'user',      content: 'first turn' },
+                              { role: 'assistant', content: 'reply' }
+                            ])
+      _(Tyla::Request::TutorChat.new.call(params)).must_be :success?
+    end
+
+    it 'accepts session_turns and history together (transition period)' do
+      params = valid_params(
+        history:       [{ role: 'user', content: 'old' }],
+        session_turns: [{ prompt: 'new' }]
+      )
+      _(Tyla::Request::TutorChat.new.call(params)).must_be :success?
+    end
+  end
 end

@@ -40,8 +40,15 @@ module Tyla
 
       def self.call(persona:, assignment:, solution:, student_file:, history:,
                     user_prompt:, endpoint:, file_context: nil, workspace_overview: nil,
-                    include_solution: false)
+                    include_solution: false, session_turns: nil)
         budget = Values::TokenBudget.for(endpoint: endpoint)
+
+        # Option C (plan 2026-06-15 §4.3): when the frontend sends rich
+        # `session_turns`, the backend owns history compression — flatten each
+        # turn into deterministic [{role, content}] pairs (file contents omitted)
+        # *before* trimming, so trim estimates the compressed cost. Absent
+        # `session_turns`, fall back to the legacy pre-compressed `history`.
+        history = build_history(history, session_turns)
 
         base_tokens =
           Values::Tokenizer.estimate(persona) +
@@ -128,25 +135,50 @@ module Tyla
         )
       end
 
+      # Flatten Option C `session_turns` into [{role, content}] pairs, or pass the
+      # legacy pre-compressed `history` through unchanged. The serializer is
+      # deterministic and emits user-first pairs (or skips degenerate turns).
+      def self.build_history(history, session_turns)
+        turns = Array(session_turns)
+        return Array(history) if turns.empty?
+
+        turns.flat_map { |turn| Values::HistoryTurnSerializer.call(turn) }
+      end
+      private_class_method :build_history
+
       def self.trim_history(history, remaining)
         turns = Array(history)
         return [[], 0] if turns.empty?
 
         selected = []
-        kept     = 0
         turns.reverse_each do |turn|
-          content = turn[:content] || turn['content']
-          cost    = Values::Tokenizer.estimate(content) + ROLE_OVERHEAD
+          cost = Values::Tokenizer.estimate(content_of(turn)) + ROLE_OVERHEAD
           break if cost > remaining
 
           selected.unshift(turn)
           remaining -= cost
-          kept      += 1
         end
 
-        [selected, turns.size - kept]
+        selected = drop_leading_assistant(selected)
+        [selected, turns.size - selected.size]
       end
       private_class_method :trim_history
+
+      # A window that begins with an assistant entry makes the first wire message
+      # role 'assistant', which Anthropic rejects (400). The newest-first cut can
+      # leave a dangling assistant (the user half of its pair didn't fit), so shed
+      # any leading assistant to keep the window user-first — or empty (plan
+      # 2026-06-15 §5.2).
+      def self.drop_leading_assistant(turns)
+        turns.drop_while { |turn| role_of(turn) == 'assistant' }
+      end
+      private_class_method :drop_leading_assistant
+
+      def self.content_of(turn) = turn[:content] || turn['content']
+      private_class_method :content_of
+
+      def self.role_of(turn) = turn[:role] || turn['role']
+      private_class_method :role_of
 
       # Strip `## ` section headings from file_context before injection so they
       # don't become sibling headings to `## Student Workspace (live)`, making the

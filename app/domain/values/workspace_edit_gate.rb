@@ -25,16 +25,12 @@ module Tyla
       EDIT_FILE = 'edit_file'
       LOAD_FILE = 'load_file'
 
-      # `### <path>` header line. Anchored to the start of a line so an inline
-      # "### " inside file contents cannot register a phantom loaded path.
-      HEADER = /^###[ \t]+(\S.*?)[ \t]*$/
-
       # Returns [gated_actions, redirected?]. `redirected?` is true iff at least
       # one edit_file was rewritten to (or collapsed into) a load_file.
       def self.call(actions:, file_context:, workspace_overview:)
         return [actions, false] if blank?(workspace_overview)
 
-        loaded     = loaded_paths(file_context)
+        loaded     = FileContextHeader.paths(file_context)
         pending    = load_targets(actions)
         redirected = false
         gated = actions.flat_map do |action|
@@ -52,9 +48,9 @@ module Tyla
         return [[action], false] unless action_type(action) == EDIT_FILE
 
         path = path_of(action)
-        return [[action], false] if blank?(path) || loaded.include?(normalize(path))
+        return [[action], false] if blank?(path) || loaded.include?(FileContextHeader.normalize(path))
 
-        replacement = pending.add?(normalize(path)) ? [load_file_for(action, path)] : []
+        replacement = pending.add?(FileContextHeader.normalize(path)) ? [load_file_for(action, path)] : []
         [replacement, true]
       end
       private_class_method :gate_action
@@ -63,7 +59,7 @@ module Tyla
       # duplicates an existing load_file (and two edits on one path collapse).
       def self.load_targets(actions)
         actions.each_with_object(Set.new) do |action, set|
-          set << normalize(path_of(action)) if action_type(action) == LOAD_FILE
+          set << FileContextHeader.normalize(path_of(action)) if action_type(action) == LOAD_FILE
         end
       end
       private_class_method :load_targets
@@ -79,14 +75,6 @@ module Tyla
       end
       private_class_method :load_file_for
 
-      def self.loaded_paths(file_context)
-        file_context.to_s.lines.each_with_object(Set.new) do |line, set|
-          m = line.match(HEADER)
-          set << normalize(m[1]) if m
-        end
-      end
-      private_class_method :loaded_paths
-
       def self.action_type(action)
         action['type'] || action[:type]
       end
@@ -96,14 +84,6 @@ module Tyla
         action['path'] || action[:path]
       end
       private_class_method :path_of
-
-      # Make header paths and action paths comparable: forward slashes, no
-      # leading "./", trimmed. The frontend spells both the same way, but a
-      # stray separator or prefix should not force a needless reload.
-      def self.normalize(path)
-        path.to_s.strip.tr('\\', '/').sub(%r{\A\./}, '')
-      end
-      private_class_method :normalize
 
       def self.blank?(value)
         value.nil? || (value.respond_to?(:empty?) && value.empty?)

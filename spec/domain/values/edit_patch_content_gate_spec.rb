@@ -105,5 +105,15 @@ describe Tyla::Values::EditPatchContentGate do
       _(result.count { |a| a['type'] == 'load_file' }).must_equal 1
       _(redirected).must_equal true
     end
+
+    # ── CRLF header regression ───────────────────────────────────────────────
+
+    it 'CRLF header ### hw2.R\r\n is recognised; content match passes edit through' do
+      crlf_ctx = "### hw2.R\r\n1| x <- 1\r\n2| y <- 2\r\n"
+      action   = edit_action(start_line: 1, search: "x <- 1\r\n", replace: 'x <- 99')
+      result, redirected = Tyla::Values::EditPatchContentGate.call(actions: [action], file_context: crlf_ctx)
+      _(redirected).must_equal false
+      _(result).must_equal [action]
+    end
   end
 end

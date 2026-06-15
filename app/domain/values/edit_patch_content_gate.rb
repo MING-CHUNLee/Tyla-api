@@ -24,8 +24,6 @@ module Tyla
     module EditPatchContentGate
       EDIT_FILE = 'edit_file'
       LOAD_FILE = 'load_file'
-      # "### path" header — same convention as WorkspaceEditGate::HEADER.
-      HEADER = /^###[ \t]+(\S.*?)[ \t]*$/
       # "N| " or "  N| " line-number prefix as injected by the frontend.
       PREFIX = /\A[ \t]*(\d+)\|[ \t]?/
 
@@ -54,7 +52,7 @@ module Tyla
       def self.gate_action(action, line_map, emitted)
         return [[action], false] unless action_type(action) == EDIT_FILE
 
-        path    = normalize(path_of(action))
+        path    = FileContextHeader.normalize(path_of(action))
         file    = line_map[path]
         patches = patches_of(action)
         return [[action], false] if file.nil? || !patches.is_a?(Array) || patches.empty?
@@ -105,8 +103,8 @@ module Tyla
       def self.parse_file_context(file_context)
         current = nil
         file_context.to_s.lines.each_with_object({}) do |line, result|
-          if (m = line.match(HEADER))
-            current = normalize(m[1])
+          if (m = line.match(FileContextHeader::HEADER))
+            current = FileContextHeader.normalize(m[1])
             result[current] ||= {}
           elsif current && (m = line.match(PREFIX))
             result[current][m[1].to_i] = line.sub(PREFIX, '')
@@ -137,11 +135,6 @@ module Tyla
 
       def self.patches_of(action) = action['patches'] || action[:patches]
       private_class_method :patches_of
-
-      def self.normalize(path)
-        path.to_s.strip.tr('\\', '/').sub(%r{\A\./}, '')
-      end
-      private_class_method :normalize
 
       def self.blank?(value)
         value.nil? || (value.respond_to?(:empty?) && value.empty?)

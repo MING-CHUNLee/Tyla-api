@@ -49,6 +49,7 @@ module Tyla
         Call `load_reference` when the question concerns how to approach, structure, improve, or check the homework. Do NOT call it for purely logistical questions (deadlines, submission format).
         Do NOT offer to run code as a follow-up question ("Would you like me to..."). If code would help, call the tool immediately.
         If you have no concrete code to act on, or when refusing, do not call any tool.
+        The conversation history is a record of past turns; edits it describes were proposals and the student may have changed those files since. When the history conflicts with the current "Student Workspace (live)" section, always treat the live section as the source of truth.
       GUIDE
 
       # Appended ONLY on the `workspace_overview` branch (plan 2026-06-12 §2,

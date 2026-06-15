@@ -453,4 +453,111 @@ describe Tyla::Prompts::BudgetAwarePromptAssembler do
       _(result.history_turns_dropped).must_equal 1
     end
   end
+
+  describe 'Option C: session_turns compression (plan 2026-06-15 §4.3)' do
+    # A realistic completed turn: a question, a prose reply, an edit suggestion,
+    # and a headers-only block naming the file the model inspected last turn.
+    def sample_turn(overrides = {})
+      {
+        'prompt'          => 'How do I fix the mean call?',
+        'prose'           => 'Use na.rm = TRUE so NAs are ignored.',
+        'context_headers' => "### hw2.R\n",
+        'actions'         => [
+          { 'type' => 'edit_file',
+            'path' => 'hw2.R',
+            'patches' => [{ 'start_line' => 3, 'search' => 'mean(x)', 'replace' => 'mean(x, na.rm = TRUE)' }] }
+        ]
+      }.merge(overrides)
+    end
+
+    def call_with(session_turns:, **extra)
+      Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona: '',
+        assignment: '',
+        solution: '',
+        student_file: { path: 'x', content: '' },
+        history: [],
+        user_prompt: '',
+        endpoint: GITHUB_ENDPOINT,
+        session_turns: session_turns,
+        **extra
+      )
+    end
+
+    it '(a) serializes session_turns into user-first [{role, content}] pairs' do
+      result = call_with(session_turns: [sample_turn])
+
+      _(result.overflow?).must_equal false
+      _(result.history.size).must_equal 2
+      user, assistant = result.history
+      _(user[:role]).must_equal 'user'
+      _(assistant[:role]).must_equal 'assistant'
+      # User entry carries the intent plus the neutral re-inspect placeholder.
+      _(user[:content]).must_include 'How do I fix the mean call?'
+      _(user[:content]).must_include 'call load_file'
+      _(user[:content]).must_include 'hw2.R'
+      # Assistant entry carries prose + a *suggested* (not applied) edit.
+      _(assistant[:content]).must_include 'na.rm = TRUE'
+      _(assistant[:content]).must_include 'Suggested editing `hw2.R`'
+    end
+
+    it '(b) ignores legacy history and prefers session_turns when both are sent' do
+      legacy = [{ role: 'user', content: 'LEGACY_HISTORY_MARKER' }]
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona: '', assignment: '', solution: '',
+        student_file: { path: 'x', content: '' },
+        history: legacy, user_prompt: '', endpoint: GITHUB_ENDPOINT,
+        session_turns: [sample_turn]
+      )
+
+      _(result.history.size).must_equal 2
+      _(result.history.map { |h| h[:content] }.join).wont_include 'LEGACY_HISTORY_MARKER'
+    end
+
+    it '(b) falls back to the legacy history path when session_turns is absent/empty' do
+      legacy = [{ role: 'user', content: 'LEGACY_HISTORY_MARKER' }]
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona: '', assignment: '', solution: '',
+        student_file: { path: 'x', content: '' },
+        history: legacy, user_prompt: '', endpoint: GITHUB_ENDPOINT,
+        session_turns: []
+      )
+
+      _(result.history).must_equal legacy
+    end
+
+    it '(c) compresses before trimming: a turn whose raw prompt would overflow still fits once serialized' do
+      # persona ≈ 7700 tok → base 7900 → remaining ≈ 100 tok of history budget.
+      # The raw prompt embeds a 4 000-char pasted code block (≈1143 tok) that
+      # could never fit in 100 tok; strip_pasted_code collapses it to a short
+      # marker, so the serialized pair fits. Trim seeing the *compressed* cost is
+      # the whole point of serializing before trim_history.
+      pasted = "Look at this:\n```r\n#{'z' * 4_000}\n```"
+      result = call_with(
+        session_turns: [sample_turn('prompt' => pasted, 'context_headers' => '')],
+        persona: 'P' * 26_950
+      )
+
+      _(result.overflow?).must_equal false
+      _(result.history.size).must_equal 2
+      joined = result.history.map { |h| h[:content] }.join
+      _(joined).must_include '[pasted code omitted'
+      _(joined).wont_include 'zzzz'   # the bulky pasted code never reaches the wire
+    end
+
+    it 'drops a dangling assistant so the trimmed window never starts on assistant (Anthropic 400 guard)' do
+      # Tight budget admits only the cheap assistant half of the pair; the
+      # expensive user half does not fit. The leading-assistant guard then sheds
+      # the orphan rather than shipping an assistant-first history.
+      big_prompt = 'q ' * 250   # ≈500 chars ≈143 tok user entry, no code fence to strip
+      result = call_with(
+        session_turns: [sample_turn('prompt' => big_prompt, 'prose' => 'ok', 'context_headers' => '', 'actions' => [])],
+        persona: 'P' * 26_950
+      )
+
+      _(result.overflow?).must_equal false
+      _(result.history).must_equal []
+      _(result.history_turns_dropped).must_equal 2
+    end
+  end
 end

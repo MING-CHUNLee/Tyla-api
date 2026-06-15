@@ -205,6 +205,7 @@ module Tyla
           file_context:       params[:file_context],
           workspace_overview: params[:workspace_overview],
           history:            params[:history],
+          session_turns:      params[:session_turns],
           user_prompt:        params[:prompt],
           endpoint:           endpoint,
           include_solution:   include_solution

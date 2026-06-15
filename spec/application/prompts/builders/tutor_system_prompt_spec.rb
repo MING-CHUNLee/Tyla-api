@@ -194,6 +194,18 @@ describe Tyla::Prompts::TutorSystemPrompt do
       _(result).wont_include '## Assignment'
     end
 
+    it 'tool use guide arbitrates staleness: live workspace wins over conflicting history (plan 2026-06-15 §5.4)' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY',
+        solution_text: '',
+        context_files: []
+      )
+      guide = result.split('## Tool Use Guide').last
+      _(guide).must_include 'conversation history'
+      _(guide).must_include 'Student Workspace (live)'
+      _(guide).must_include 'source of truth'
+    end
+
     it 'mentions load_reference in the tool use guide with the logistical-question carve-out' do
       result = Tyla::Prompts::TutorSystemPrompt.build(
         policy_text: 'POLICY',

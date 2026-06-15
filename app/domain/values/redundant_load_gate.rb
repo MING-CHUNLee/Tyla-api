@@ -31,14 +31,13 @@ module Tyla
     # what it acts on. See §6 D7 and the cross-gate regression spec.
     module RedundantLoadGate
       LOAD_FILE = 'load_file'
-      HEADER    = /^###[ \t]+(\S.*?)[ \t]*$/
 
       # Returns [gated_actions, dropped?]. `dropped?` is true iff at least one
       # load_file was removed (either redundant or intra-reply duplicate).
       def self.call(actions:, file_context:)
         return [actions, false] if blank?(file_context)
 
-        loaded = loaded_paths(file_context)
+        loaded = FileContextHeader.paths(file_context)
         return [actions, false] if loaded.empty?
 
         seen  = Set.new
@@ -52,7 +51,7 @@ module Tyla
       def self.redundant?(action, loaded, seen)
         return false unless action_type(action) == LOAD_FILE
 
-        key = normalize(path_of(action))
+        key = FileContextHeader.normalize(path_of(action))
         return true if loaded.include?(key) || seen.include?(key)
 
         seen << key
@@ -60,24 +59,11 @@ module Tyla
       end
       private_class_method :redundant?
 
-      def self.loaded_paths(file_context)
-        file_context.to_s.lines.each_with_object(Set.new) do |line, set|
-          m = line.match(HEADER)
-          set << normalize(m[1]) if m
-        end
-      end
-      private_class_method :loaded_paths
-
       def self.action_type(action) = action['type'] || action[:type]
       private_class_method :action_type
 
       def self.path_of(action) = action['path'] || action[:path]
       private_class_method :path_of
-
-      def self.normalize(path)
-        path.to_s.strip.tr('\\', '/').sub(%r{\A\./}, '')
-      end
-      private_class_method :normalize
 
       def self.blank?(value)
         value.nil? || (value.respond_to?(:empty?) && value.empty?)

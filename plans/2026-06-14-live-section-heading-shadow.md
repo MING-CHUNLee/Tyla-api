@@ -141,6 +141,14 @@ A file is loaded when its `### filename` header followed by numbered lines
 
 **注意**：A 修好後 B 不是必需的，但可以加固。兩者是獨立的，可以同步實作。
 
+> **跨 repo 約定（與 history 壓縮共用）**：`### path` 不只後端在用——前端 history 序列化器的
+> `extractHeaderPaths`（[2026-06-14-history-file-omission-compression.md](./2026-06-14-history-file-omission-compression.md)
+> §4.2／§6.8）也靠 `^### (.+)$` 抓「上一輪看過哪些檔」。所以 `### <relative path>` 是
+> **後端 gates ／本 guide ／前端序列化器的共同依賴**，屬跨 repo 明文約定（恰三個 `#` ＋空格＋相對路徑，
+> LF/CRLF 皆可）；任何一端改檔頭格式都會靜默打到另一端，須共用常數＋兩端測試固定。詳見 compression §6.8；
+> **落地規格**（後端抽 `FileContextHeader` ＋ spec 固定點，含本 gate 目前**零覆蓋**的 `workspace_edit_gate_spec`）見
+> [2026-06-15-shared-header-constant-and-format-tests.md](./2026-06-15-shared-header-constant-and-format-tests.md)。
+
 ### C（前端，跨 repo，延後）：MindyCLI 不送 `## ` section 標頭
 
 從根本上讓前端送出的 `file_context` 只有 `### path` 行和內容，不含 `## ` 標頭。
@@ -233,6 +241,11 @@ A file is loaded when its `### filename` header followed by numbered lines
 | @-mention dedup | 前序計畫 §8 step 6 C：@-mention 路徑納入 `resolved` set，避免同一檔案出現兩次 `## ` 段 |
 
 兩項皆為清理性質（後端 A 修完後已不影響正確性），MindyCLI 可擇期清理。
+
+> **⚠️ C 清理時務必只動 `## ` 標頭、保留 `### path`**：前端自己的 history 序列化器
+> （[2026-06-14-history-file-omission-compression.md](./2026-06-14-history-file-omission-compression.md) §4.2
+> `extractHeaderPaths`）也靠 `^### (.+)$` 抓檔名；若清理時連 `### path` 一起改了格式，會**同時**打掉
+> 後端 gates 與前端序列化器。`### <relative path>` 是跨 repo 明文約定，見 compression §6.8。
 
 ---
 

@@ -640,6 +640,78 @@ module Tyla
         _(dto.actions).must_equal []
         _(dto.content).must_equal 'Here is the explanation.'   # genuine prose preserved
       end
+
+      # ── Option C: backend-owned history compression (plan 2026-06-15 §4.3 / Phase E) ──
+
+      def turn(prompt:, prose: nil, context_headers: nil, actions: nil)
+        { prompt: prompt, prose: prose, context_headers: context_headers, actions: actions }.compact
+      end
+
+      it 'session_turns: the backend compresses each turn into [user, assistant] history pairs' do
+        id      = seed_guard(attack_probability: 0.1)
+        client  = tutor_llm(content: 'ok')
+        turns   = [turn(prompt: 'How do I fix the histogram?',
+                        prose: 'Use a smaller binwidth.',
+                        context_headers: "### hw2.R\n",
+                        actions: [{ type: 'edit_file', path: 'hw2.R',
+                                    patches: [{ start_line: 5, search: 'bins=30', replace: 'binwidth=2' }] }])]
+        call_with(request: request_for(id, session_turns: turns), llm_client: client)
+
+        history = client.calls.first[:history]
+        roles   = history.map { |h| h[:role] || h['role'] }
+        _(roles).must_equal %w[user assistant]
+
+        user, assistant = history.map { |h| h[:content] || h['content'] }
+        _(user).must_include 'How do I fix the histogram?'
+        _(user).must_include 'Previously inspected'         # seen-path placeholder, contents omitted
+        _(user).must_include 'hw2.R'
+        _(assistant).must_include 'Use a smaller binwidth.'  # terminal prose preserved
+        _(assistant).must_include 'Suggested editing'        # neutral (proposal) edit wording
+      end
+
+      it 'session_turns: takes precedence over a legacy history array when both are sent' do
+        id     = seed_guard(attack_probability: 0.1)
+        client = tutor_llm(content: 'ok')
+        turns  = [turn(prompt: 'earlier question', prose: 'earlier answer')]
+        legacy = [{ role: 'user', content: 'LEGACY_SHOULD_NOT_APPEAR' }]
+        call_with(request: request_for(id, session_turns: turns, history: legacy), llm_client: client)
+
+        contents = client.calls.first[:history].map { |h| h[:content] || h['content'] }.join("\n")
+        _(contents).must_include 'earlier question'
+        _(contents).wont_include 'LEGACY_SHOULD_NOT_APPEAR'
+      end
+
+      it 'session_turns: absent → the legacy history path is used unchanged (regression)' do
+        id     = seed_guard(attack_probability: 0.1)
+        client = tutor_llm(content: 'ok')
+        legacy = [{ role: 'user', content: 'a real legacy turn' },
+                  { role: 'assistant', content: 'a real legacy reply' }]
+        call_with(request: request_for(id, history: legacy), llm_client: client)
+
+        _(client.calls.first[:history]).must_equal legacy
+      end
+
+      it 'session_turns: a normal turn leaves history_truncated unset (compression keeps it small)' do
+        id     = seed_guard(attack_probability: 0.1)
+        turns  = [turn(prompt: 'short question', prose: 'short answer')]
+        _, dto = call_with(request: request_for(id, session_turns: turns), llm_client: tutor_llm).value!
+
+        _(Array(dto.warnings)).wont_include 'history_truncated'
+      end
+
+      it 'session_turns: the round-1 system prompt carries the staleness arbitration rule (§5.4)' do
+        id       = seed_guard(attack_probability: 0.1)
+        captured = nil
+        client   = Object.new
+        client.define_singleton_method(:send_prompt) do |**kwargs|
+          captured = kwargs
+          Infrastructure::LlmResponse.new(content: 'ok', usage: {})
+        end
+        turns = [turn(prompt: 'q', prose: 'a')]
+        call_with(request: request_for(id, session_turns: turns), llm_client: client)
+
+        _(captured[:system_prompt]).must_include 'source of truth'
+      end
     end
   end
 end

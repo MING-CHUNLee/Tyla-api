@@ -112,5 +112,15 @@ describe Tyla::Values::RedundantLoadGate do
       _(result).must_equal []
       _(dropped).must_equal true
     end
+
+    # ── CRLF header regression ───────────────────────────────────────────────
+
+    it 'CRLF header ### hw2.R\r\n is recognised as loaded; redundant load is dropped' do
+      crlf_ctx = "### hw2.R\r\n1| x <- 1\r\n"
+      actions  = [load_action('hw2.R')]
+      result, dropped = Tyla::Values::RedundantLoadGate.call(actions: actions, file_context: crlf_ctx)
+      _(result).must_equal []
+      _(dropped).must_equal true
+    end
   end
 end
