@@ -452,6 +452,38 @@ module Tyla
         _(dto.warnings).must_be_nil
       end
 
+      # ── Session token limit (DEV feature 2026-06-16) ─────────────────────────
+
+      it 'fills warnings with session_limit_reached when the input nears the channel cap' do
+        id     = seed_guard(attack_probability: 0.1)
+        # Unknown channel (test endpoint nil) → 8_000 input cap; 7_500 ≥ 0.9 × 8_000.
+        client = tutor_llm(content: 'Wrapping up.', usage: { input_tokens: 7_500, output_tokens: 5 })
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(dto.warnings).must_include 'session_limit_reached'
+      end
+
+      it 'leaves session_limit_reached unset when the input is well under the cap' do
+        id     = seed_guard(attack_probability: 0.1)
+        client = tutor_llm(content: 'ok', usage: { input_tokens: 100, output_tokens: 5 })
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(Array(dto.warnings)).wont_include 'session_limit_reached'
+      end
+
+      it 'measures the terminal (round-2) input, not the cross-round Σ, for the session limit' do
+        id    = seed_guard(attack_probability: 0.1)
+        # Round 1 is small; round 2's own input (7_500) trips the 0.9 × 8_000 cap.
+        # The Σ that becomes client `usage` is irrelevant to the check.
+        final = Infrastructure::LlmResponse.new(content: 'Compare your binwidths.',
+                                                usage: { input_tokens: 7_500, output_tokens: 20 })
+        client = scripted_llm(load_reference_reply, final)
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(dto.warnings).must_include 'session_limit_reached'
+        _(dto.warnings).must_include 'reference_loaded'
+      end
+
       it 'fills warnings with workspace_overview_dropped when the overview exceeds the budget' do
         id   = seed_guard(attack_probability: 0.1)
         huge = 'o' * 40_000   # ≫ the unknown-channel input budget → whole-block drop

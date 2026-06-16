@@ -183,6 +183,27 @@ describe Tyla::Prompts::BudgetAwarePromptAssembler do
       _(result.overflow?).must_equal false
       _(result.max_tokens).must_equal 4_000
     end
+
+    it 'echoes the channel input cap as input_token_limit (GitHub Models = 8_000)' do
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona: 'P', assignment: 'A', solution: 'S',
+        student_file: { path: 'x', content: 'c' },
+        history: [], user_prompt: 'q',
+        endpoint: GITHUB_ENDPOINT
+      )
+      _(result.input_token_limit).must_equal 8_000
+    end
+
+    it 'echoes input_token_limit even on the mandatory-overflow path' do
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona: 'P' * 30_000, assignment: '', solution: '',
+        student_file: { path: 'x', content: 'c' },
+        history: [], user_prompt: 'q',
+        endpoint: GITHUB_ENDPOINT
+      )
+      _(result.overflow?).must_equal true
+      _(result.input_token_limit).must_equal 8_000
+    end
   end
 
   describe 'file_context (live workspace) injection' do

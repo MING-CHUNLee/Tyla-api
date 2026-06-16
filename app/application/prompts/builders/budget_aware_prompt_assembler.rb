@@ -32,8 +32,12 @@ module Tyla
       FORMATTING_OVERHEAD = 200
       ROLE_OVERHEAD       = 4
 
+      # `input_token_limit` echoes the channel's per-request input cap (the
+      # effective "MAX_USAGE"); the caller compares the LLM's real
+      # `usage.input_tokens` against it to detect a turn that is closing on the
+      # window, without re-deriving the channel from the endpoint.
       Result = Struct.new(
-        :system_prompt, :history, :max_tokens,
+        :system_prompt, :history, :max_tokens, :input_token_limit,
         :student_file_dropped, :workspace_overview_dropped, :history_turns_dropped, :overflow?,
         keyword_init: true
       )
@@ -62,6 +66,7 @@ module Tyla
             system_prompt:              nil,
             history:                    [],
             max_tokens:                 budget.output_reservation,
+            input_token_limit:          budget.input_token_limit,
             student_file_dropped:       true,
             workspace_overview_dropped: false,
             history_turns_dropped:      Array(history).size,
@@ -128,6 +133,7 @@ module Tyla
           system_prompt:              system_prompt,
           history:                    selected,
           max_tokens:                 budget.output_reservation,
+          input_token_limit:          budget.input_token_limit,
           student_file_dropped:       workspace_dropped,
           workspace_overview_dropped: overview_dropped,
           history_turns_dropped:      dropped,

@@ -29,6 +29,16 @@ module Tyla
 
       LOAD_REFERENCE = 'load_reference'
 
+      # DEV feature (2026-06-16): as a turn's assembled input closes on the
+      # channel's per-request cap (TokenBudget#input_token_limit — the effective
+      # "MAX_USAGE"), surface a `session_limit_reached` signal so the frontend can
+      # tell the student we are wrapping up this conversation and starting a fresh
+      # one — rather than silently dropping older turns (history_truncated) or, at
+      # the hard edge, failing the turn with 413 context_overflow. Measured against
+      # the LLM's *real* terminal-round `usage.input_tokens`, not the estimate.
+      SESSION_LIMIT_RATIO   = 0.9
+      SESSION_LIMIT_WARNING = 'session_limit_reached'
+
       # Decision E (plan 2026-06-13 §2/§6 D1): the trigger case (round 2's two
       # redundant load_file actions both dropped) leaves actions=[]; if the model
       # also emitted no prose, the student would get a blank turn. The backend
@@ -126,9 +136,10 @@ module Tyla
         # guard_log missing, prompt mismatch, or derived verdict :forbidden → refuse, no tutor call
         return forbidden_outcome(log, params[:project_id]) unless tutor_allowed?(verdict)
 
-        reply, assembled, reference_loaded = yield tutor_mini_loop(credentials, params)
+        reply, assembled, reference_loaded, approaching_limit = yield tutor_mini_loop(credentials, params)
 
-        Success(ok_outcome(log, reply, verdict, assembled, params, reference_loaded: reference_loaded))
+        Success(ok_outcome(log, reply, verdict, assembled, params,
+                           reference_loaded: reference_loaded, approaching_limit: approaching_limit))
       end
 
       private
@@ -243,11 +254,25 @@ module Tyla
       # Terminal packaging for the mini-loop: usage becomes Σ over all rounds
       # (the API's `usage` now means "all tutor calls this turn") and the
       # Phase 0 measurement line is emitted (plan §3 Step 4 — D1/D3 decision data).
+      # The session-limit check reads the *terminal* round's own input tokens (the
+      # actual final prompt sent — round 2 when the loop ran, which is the larger
+      # one), NOT the cross-round Σ that becomes the client-facing `usage`.
       def finish_loop(rounds, assembled, reference_loaded:)
+        approaching = approaching_session_limit?(rounds.last, assembled)
         reply = rounds.last
         reply = reply.with(usage: rounds.map(&:usage).reduce { |sum, u| sum_usage(sum, u) }) if rounds.size > 1
         log_phase0(rounds, reference_loaded)
-        Success([reply, assembled, reference_loaded])
+        Success([reply, assembled, reference_loaded, approaching])
+      end
+
+      # True once the real input for the terminal tutor call reaches
+      # SESSION_LIMIT_RATIO of the channel's input cap. Safe-default false when
+      # the cap is unknown or the provider omitted usage (count → 0).
+      def approaching_session_limit?(terminal_round, assembled)
+        limit = assembled.input_token_limit.to_i
+        return false unless limit.positive?
+
+        usage_count(terminal_round.usage, :input_tokens) >= (limit * SESSION_LIMIT_RATIO)
       end
 
       # Detection must cover BOTH parse paths (§1.3): native tool_calls and the
@@ -365,14 +390,15 @@ module Tyla
       # §2.7: surface the assembler's trim flags instead of dropping silently —
       # the CLI renders these as status warnings so the student knows the tutor
       # did not see their file / older turns this round.
-      def ok_outcome(log, reply, verdict, assembled, params, reference_loaded:)
+      def ok_outcome(log, reply, verdict, assembled, params, reference_loaded:, approaching_limit:)
         prose, actions, edit_file_redirected, redundant_load_dropped = extract_reply(reply, params)
         # Decision E: never ship an empty content + empty actions turn (§6 D1). When
         # the gates cleared every action and the model gave no prose, inject a nudge.
         prose = FALLBACK_PROSE if blank_text?(prose) && actions.empty?
         warnings = warnings_for(assembled, reference_loaded: reference_loaded,
                                            edit_file_redirected: edit_file_redirected,
-                                           redundant_load_dropped: redundant_load_dropped)
+                                           redundant_load_dropped: redundant_load_dropped,
+                                           approaching_limit: approaching_limit)
         dto = Response::TutorChat.new(
           log_id:   log.id,
           status:   verdict == :unavailable ? 'unavailable' : 'done',
@@ -390,7 +416,10 @@ module Tyla
       # (plan 2026-06-13 §4.2): it signals the backend caught the model re-loading an
       # already-loaded file, so the frontend reads cleared actions as "loop broken"
       # rather than an error — and it doubles as the Phase 0 loop-rate measurement.
-      def warnings_for(assembled, reference_loaded:, edit_file_redirected:, redundant_load_dropped:)
+      # `session_limit_reached` (2026-06-16) is independent of the trim flags: the
+      # turn still succeeded, but its input has closed on the channel cap, so the
+      # frontend should prompt the student to start a fresh conversation.
+      def warnings_for(assembled, reference_loaded:, edit_file_redirected:, redundant_load_dropped:, approaching_limit:)
         warnings = []
         warnings << 'reference_loaded'           if reference_loaded
         warnings << 'file_context_dropped'       if assembled.student_file_dropped
@@ -398,6 +427,7 @@ module Tyla
         warnings << 'history_truncated'          if assembled.history_turns_dropped.to_i.positive?
         warnings << 'edit_file_redirected'       if edit_file_redirected
         warnings << 'redundant_load_dropped'     if redundant_load_dropped
+        warnings << SESSION_LIMIT_WARNING        if approaching_limit
         warnings
       end
     end
