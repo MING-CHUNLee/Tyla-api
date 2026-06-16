@@ -52,19 +52,29 @@ module Tyla
 
       def post_json(body)
         warn "[OpenAiClient] POST #{@endpoint} (key: #{@api_key[0..6]}...)"
+        trace    = LlmDebugLog.request(provider: 'openai', model: @model, endpoint: @endpoint.to_s, body: body)
+        response = open_http.request(build_request(body))
+        LlmDebugLog.response(trace, status: response.code, body: response.body)
+        response
+      rescue Net::ReadTimeout, Net::OpenTimeout, Errno::ETIMEDOUT
+        LlmDebugLog.failure(trace, error: 'request timed out')
+        raise LlmError::Timeout, 'openai request timed out'
+      end
+
+      def open_http
         http = Net::HTTP.new(@endpoint.host, @endpoint.port)
         http.use_ssl = @endpoint.scheme == 'https'
         http.read_timeout = READ_TIMEOUT
         http.open_timeout = OPEN_TIMEOUT
+        http
+      end
 
+      def build_request(body)
         request = Net::HTTP::Post.new(@endpoint.request_uri)
         request['Authorization'] = "Bearer #{@api_key}"
         request['Content-Type']  = 'application/json'
         request.body = body
-
-        http.request(request)
-      rescue Net::ReadTimeout, Net::OpenTimeout, Errno::ETIMEDOUT
-        raise LlmError::Timeout, 'openai request timed out'
+        request
       end
 
       def parse(response)

@@ -40,20 +40,30 @@ module Tyla
       private
 
       def post_json(body)
+        trace    = LlmDebugLog.request(provider: 'anthropic', model: @model, endpoint: ENDPOINT.to_s, body: body)
+        response = open_http.request(build_request(body))
+        LlmDebugLog.response(trace, status: response.code, body: response.body)
+        response
+      rescue Net::ReadTimeout, Net::OpenTimeout, Errno::ETIMEDOUT
+        LlmDebugLog.failure(trace, error: 'request timed out')
+        raise LlmError::Timeout, 'anthropic request timed out'
+      end
+
+      def open_http
         http = Net::HTTP.new(ENDPOINT.host, ENDPOINT.port)
         http.use_ssl = true
         http.read_timeout = READ_TIMEOUT
         http.open_timeout = OPEN_TIMEOUT
+        http
+      end
 
+      def build_request(body)
         request = Net::HTTP::Post.new(ENDPOINT.request_uri)
         request['x-api-key']          = @api_key
         request['anthropic-version']  = API_VERSION
         request['Content-Type']       = 'application/json'
         request.body = body
-
-        http.request(request)
-      rescue Net::ReadTimeout, Net::OpenTimeout, Errno::ETIMEDOUT
-        raise LlmError::Timeout, 'anthropic request timed out'
+        request
       end
 
       def parse(response)

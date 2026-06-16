@@ -11,6 +11,9 @@ dist/
 # temporary assets during development
 tmp/
 
+# debug logs (LLM request/response capture, opt-in via LLM_DEBUG_LOG)
+log/
+
 # test/dev infrastructure
 *.db
 
