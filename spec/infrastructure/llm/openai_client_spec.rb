@@ -117,4 +117,53 @@ describe Tyla::Infrastructure::OpenAiClient do
     _ { client.send_prompt(system_prompt: 's', user_message: 'u') }
       .must_raise Tyla::Infrastructure::LlmError::Timeout
   end
+
+  # ── Rate-limit pass-through (plan 2026-06-18 route C1) ──────────────────────
+
+  it 'raises LlmError::RateLimited on 429, carrying retry-after and the rate-limit bag' do
+    stub_request(:post, 'https://api.openai.com/v1/chat/completions')
+      .to_return(
+        status: 429,
+        body: 'rate limited',
+        headers: { 'Retry-After' => '30', 'x-ratelimit-remaining-requests' => '0' }
+      )
+
+    err = _ { client.send_prompt(system_prompt: 's', user_message: 'u') }
+          .must_raise Tyla::Infrastructure::LlmError::RateLimited
+    _(err.retry_after).must_equal '30'
+    _(err.rate_limit['x-ratelimit-remaining-requests']).must_equal '0'
+    _(err.rate_limit['retry-after']).must_equal '30'
+  end
+
+  it 'passes rate-limit headers through on a successful response' do
+    stub_request(:post, 'https://api.openai.com/v1/chat/completions')
+      .to_return(
+        status: 200,
+        body: {
+          choices: [{ message: { role: 'assistant', content: 'ok' } }],
+          usage:   { prompt_tokens: 5, completion_tokens: 2 }
+        }.to_json,
+        headers: { 'Content-Type' => 'application/json', 'x-ratelimit-remaining-requests' => '5' }
+      )
+
+    resp = client.send_prompt(system_prompt: 'sys', user_message: 'hi')
+
+    _(resp.rate_limit['x-ratelimit-remaining-requests']).must_equal '5'
+  end
+
+  it 'defaults rate_limit to {} when the response carries no rate-limit headers' do
+    stub_request(:post, 'https://api.openai.com/v1/chat/completions')
+      .to_return(
+        status: 200,
+        body: {
+          choices: [{ message: { role: 'assistant', content: 'ok' } }],
+          usage:   { prompt_tokens: 5, completion_tokens: 2 }
+        }.to_json,
+        headers: { 'Content-Type' => 'application/json' }
+      )
+
+    resp = client.send_prompt(system_prompt: 'sys', user_message: 'hi')
+
+    _(resp.rate_limit).must_equal({})
+  end
 end

@@ -31,6 +31,10 @@ describe Tyla::Representer::HttpResponse do
       _(representer_for(status: :cannot_process).http_status_code).must_equal 422
     end
 
+    it 'maps :too_many_requests to 429' do
+      _(representer_for(status: :too_many_requests).http_status_code).must_equal 429
+    end
+
     it 'maps :internal_error to 500' do
       _(representer_for(status: :internal_error).http_status_code).must_equal 500
     end

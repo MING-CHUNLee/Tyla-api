@@ -14,6 +14,7 @@ module Tyla
       cannot_process: :cannot_process,
       upstream_error: :upstream_error,
       upstream_timeout: :upstream_timeout,
+      rate_limited: :too_many_requests,   # (plan 2026-06-18 route C1) — provider 429
       db_error: :internal_error
     }.freeze
 
@@ -40,6 +41,12 @@ module Tyla
                   errors:  errors
                 )
                 rep = Representer::HttpResponse.new(result)
+                # (C1) echo the provider's back-off as a Retry-After header so the
+                # frontend can wait without parsing the body; errors.retry_after stays
+                # as the JSON fallback. Only set when present.
+                if tag == :rate_limited && errors.is_a?(Hash) && errors[:retry_after]
+                  response['Retry-After'] = errors[:retry_after].to_s
+                end
                 r.halt(rep.http_status_code, rep.to_json)
               end
 

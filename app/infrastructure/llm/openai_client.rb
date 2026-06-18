@@ -54,7 +54,7 @@ module Tyla
         warn "[OpenAiClient] POST #{@endpoint} (key: #{@api_key[0..6]}...)"
         trace    = LlmDebugLog.request(provider: 'openai', model: @model, endpoint: @endpoint.to_s, body: body)
         response = open_http.request(build_request(body))
-        LlmDebugLog.response(trace, status: response.code, body: response.body)
+        LlmDebugLog.response(trace, status: response.code, body: response.body, headers: response.to_hash)
         response
       rescue Net::ReadTimeout, Net::OpenTimeout, Errno::ETIMEDOUT
         LlmDebugLog.failure(trace, error: 'request timed out')
@@ -77,7 +77,22 @@ module Tyla
         request
       end
 
+      # 429 → distinct RateLimited (with the provider's Retry-After + header bag)
+      # so the API can answer 429 and the frontend can back off; any other non-2xx
+      # stays a generic Upstream. No-op on a 2xx response.
+      def raise_if_rate_limited(response, rate_limit)
+        return unless response.is_a?(Net::HTTPTooManyRequests)
+
+        raise LlmError::RateLimited.new(
+          'openai rate limited (429)',
+          retry_after: response['retry-after'],
+          rate_limit:  rate_limit
+        )
+      end
+
       def parse(response)
+        rate_limit = RateLimitHeaders.extract(response)
+        raise_if_rate_limited(response, rate_limit)
         raise LlmError::Upstream, "openai returned #{response.code}" unless response.is_a?(Net::HTTPSuccess)
 
         data    = JSON.parse(response.body)
@@ -96,7 +111,7 @@ module Tyla
           nil
         end.compact
 
-        LlmResponse.new(content: content, usage: usage, tool_calls: tool_calls)
+        LlmResponse.new(content: content, usage: usage, tool_calls: tool_calls, rate_limit: rate_limit)
       rescue JSON::ParserError => e
         raise LlmError::Upstream, "openai returned malformed JSON: #{e.message}"
       end

@@ -39,6 +39,13 @@ module Tyla
       SESSION_LIMIT_RATIO   = 0.9
       SESSION_LIMIT_WARNING = 'session_limit_reached'
 
+      # Provider rate-limit pass-through (plan 2026-06-18 route C). A "remaining"
+      # axis (requests or tokens) at or below this floor is treated as tripped.
+      # ENV-overridable; default 2, to be calibrated once C3 measures the real
+      # GitHub Models field values. Used here by the hard-429 path to label the
+      # 429's limit_dimension; the C2 soft-warning path will share it later.
+      PROVIDER_REMAINING_FLOOR = ENV.fetch('PROVIDER_REMAINING_FLOOR', '2').to_i
+
       # Decision E (plan 2026-06-13 §2/§6 D1): the trigger case (round 2's two
       # redundant load_file actions both dropped) leaves actions=[]; if the model
       # also emitted no prose, the student would get a blank turn. The backend
@@ -245,8 +252,20 @@ module Tyla
         Success(reply)
       rescue Infrastructure::LlmError::Timeout
         Failure[:upstream_timeout, 'LLM request timed out']
+      rescue Infrastructure::LlmError::RateLimited => e
+        rate_limited_failure(e)
       rescue Infrastructure::LlmError::Upstream => e
         Failure[:upstream_error, e.message]
+      end
+
+      # 429 → :rate_limited (HTTP 429). `errors` carries the provider's back-off
+      # plus the §3.1 "which limit" labels: limit_scope is always 'provider_account'
+      # (429 is account-level, never conversation), limit_dimension is best-effort.
+      def rate_limited_failure(error)
+        Failure[:rate_limited, 'LLM provider rate limited',
+                { retry_after:     error.retry_after,
+                  limit_scope:     'provider_account',
+                  limit_dimension: tripped_rate_limit_dimension(error.rate_limit) || 'unknown' }]
       end
 
       # ── Plain helpers (no Result wrapping) ─────────────────────────────────────
@@ -273,6 +292,40 @@ module Tyla
         return false unless limit.positive?
 
         usage_count(terminal_round.usage, :input_tokens) >= (limit * SESSION_LIMIT_RATIO)
+      end
+
+      # best-effort: returns the tripped dimension ('requests'/'tokens'/'unknown'),
+      # or nil when nothing tripped. `rate_limit` is the schema-agnostic header bag
+      # (see RateLimitHeaders). Safe default: empty bag (unknown channel / no header)
+      # → nil. Shared by the hard-429 path (errors.limit_dimension) and, later, the
+      # C2 soft path.
+      def tripped_rate_limit_dimension(rate_limit)
+        return nil if rate_limit.nil? || rate_limit.empty?
+
+        name = lowest_tripped_remaining(rate_limit)
+        name && remaining_axis(name)
+      end
+
+      # Name of the smallest integer-valued "remaining" field that broke the floor,
+      # or nil. reset/retry-after lack "remaining" and are naturally excluded; a
+      # non-integer value (percent/string) is dropped.
+      def lowest_tripped_remaining(rate_limit)
+        tripped = rate_limit.filter_map do |name, value|
+          n = name.to_s.downcase
+          next unless n.include?('remaining')
+
+          v = Integer(value, exception: false)
+          [n, v] if v && v <= PROVIDER_REMAINING_FLOOR
+        end
+        tripped.min_by { |_n, v| v }&.first
+      end
+
+      # Infer the axis from the header name (§3.1); 'unknown' when it names neither.
+      def remaining_axis(name)
+        return 'requests' if name.include?('request')
+        return 'tokens'   if name.include?('token')
+
+        'unknown'
       end
 
       # Detection must cover BOTH parse paths (§1.3): native tool_calls and the

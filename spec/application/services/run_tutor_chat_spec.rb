@@ -89,6 +89,19 @@ module Tyla
         client
       end
 
+      # Tutor client whose send_prompt raises a provider 429 (LlmError::RateLimited),
+      # carrying an explicit retry_after and rate-limit header bag.
+      def rate_limited_tutor(retry_after: '30', rate_limit: { 'x-ratelimit-remaining-requests' => '0' })
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          raise Infrastructure::LlmError::RateLimited.new(
+            'rate limited', retry_after: retry_after, rate_limit: rate_limit
+          )
+        end
+        client.define_singleton_method(:calls) { [] }
+        client
+      end
+
       def call_with(llm_client:, request:, headers: nil)
         headers ||= valid_headers
         Infrastructure::LlmClient.stub(:for, llm_client) do
@@ -399,6 +412,88 @@ module Tyla
                                                       'HTTP 503'))
         _(outcome).must_be :failure?
         _(outcome.failure.first).must_equal :upstream_error
+      end
+
+      # ── Provider rate-limit (plan 2026-06-18 route C1) ───────────────────────
+
+      it 'returns Failure[:rate_limited] with retry_after + provider_account scope on a 429' do
+        id      = seed_guard(attack_probability: 0.1)
+        outcome = call_with(request: request_for(id), llm_client: rate_limited_tutor(retry_after: '42'))
+
+        _(outcome).must_be :failure?
+        tag, _message, errors = outcome.failure
+        _(tag).must_equal :rate_limited
+        _(errors[:retry_after]).must_equal '42'
+        _(errors[:limit_scope]).must_equal 'provider_account'
+      end
+
+      it 'labels the 429 limit_dimension as "requests" from a remaining-requests header' do
+        id      = seed_guard(attack_probability: 0.1)
+        client  = rate_limited_tutor(rate_limit: { 'x-ratelimit-remaining-requests' => '0' })
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome.failure[2][:limit_dimension]).must_equal 'requests'
+      end
+
+      it 'falls back to limit_dimension "unknown" when only Retry-After is present (no remaining header)' do
+        id      = seed_guard(attack_probability: 0.1)
+        client  = rate_limited_tutor(rate_limit: { 'retry-after' => '30' })
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome.failure[2][:limit_dimension]).must_equal 'unknown'
+      end
+
+      it 'mini-loop: a round-2 429 surfaces as the :rate_limited failure' do
+        id     = seed_guard(attack_probability: 0.1)
+        count  = 0
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          count += 1
+          if count > 1
+            raise Infrastructure::LlmError::RateLimited.new(
+              'rate limited', retry_after: '30', rate_limit: { 'x-ratelimit-remaining-requests' => '0' }
+            )
+          end
+
+          Infrastructure::LlmResponse.new(content: 'r1', usage: { input_tokens: 1, output_tokens: 1 },
+                                          tool_calls: [{ 'type' => 'load_reference', 'name' => 'reference_solution' }])
+        end
+
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome).must_be :failure?
+        _(outcome.failure.first).must_equal :rate_limited
+      end
+
+      # ── tripped_rate_limit_dimension unit (shared by hard 429 + C2 soft path) ──
+
+      def dimension_for(bag)
+        RunTutorChat.new.send(:tripped_rate_limit_dimension, bag)
+      end
+
+      it 'tripped_rate_limit_dimension: infers "requests" from a low remaining-requests field' do
+        _(dimension_for('x-ratelimit-remaining-requests' => '0')).must_equal 'requests'
+      end
+
+      it 'tripped_rate_limit_dimension: infers "tokens" from a low remaining-tokens field' do
+        _(dimension_for('x-ratelimit-remaining-tokens' => '1')).must_equal 'tokens'
+      end
+
+      it 'tripped_rate_limit_dimension: when both axes are low it picks the smaller value\'s axis' do
+        _(dimension_for('x-ratelimit-remaining-requests' => '2',
+                        'x-ratelimit-remaining-tokens'   => '0')).must_equal 'tokens'
+      end
+
+      it 'tripped_rate_limit_dimension: a low remaining field with no request/token word is "unknown"' do
+        _(dimension_for('x-ratelimit-remaining' => '0')).must_equal 'unknown'
+      end
+
+      it 'tripped_rate_limit_dimension: returns nil when remaining is well above the floor' do
+        _(dimension_for('x-ratelimit-remaining-requests' => '500')).must_be_nil
+      end
+
+      it 'tripped_rate_limit_dimension: returns nil for an empty bag (unknown channel / no header)' do
+        _(dimension_for({})).must_be_nil
       end
 
       it 'round-1 system prompt embeds persona, assignment, manifest and student file — but NOT the solution' do

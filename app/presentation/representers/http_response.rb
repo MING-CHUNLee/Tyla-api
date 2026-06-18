@@ -32,6 +32,7 @@ module Tyla
         conflict: 409,
         payload_too_large: 413,
         cannot_process: 422,
+        too_many_requests: 429,
 
         internal_error: 500,
         upstream_error: 502,
