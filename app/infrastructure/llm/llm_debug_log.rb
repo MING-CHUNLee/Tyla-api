@@ -64,14 +64,18 @@ module Tyla
       end
 
       # Logs the matching response. No-op when `trace` is nil (logging disabled or
-      # the request half failed). `body` is the raw response body string.
-      def response(trace, status:, body:)
+      # the request half failed). `body` is the raw response body string. `headers`
+      # (optional) is the response header hash — logged so C3 can measure the
+      # provider's real `*ratelimit*` field names; defaults to {} (no header block,
+      # preserving the original output for callers that don't pass it).
+      def response(trace, status:, body:, headers: {})
         return unless trace
 
+        header_block = headers.empty? ? '' : "headers=#{headers.inspect}\n#{divider}\n"
         write <<~ENTRY
           [#{timestamp}] ##{trace.id} #{trace.provider} ← RESPONSE status=#{status} (#{elapsed_ms(trace)}ms)
           #{divider}
-          #{pretty(body)}
+          #{header_block}#{pretty(body)}
         ENTRY
         nil
       rescue StandardError

@@ -85,6 +85,30 @@ describe Tyla::Infrastructure::LlmDebugLog do
       _(contents).must_match(/NO RESPONSE/)
       _(contents).must_match(/request timed out/)
     end
+
+    it 'logs a headers block when response headers are supplied (C3)' do
+      trace = Tyla::Infrastructure::LlmDebugLog.request(
+        provider: 'openai', model: 'gpt', endpoint: 'http://x', body: '{}'
+      )
+      Tyla::Infrastructure::LlmDebugLog.response(
+        trace,
+        status:  '200',
+        body:    '{}',
+        headers: { 'x-ratelimit-remaining-requests' => ['0'] }
+      )
+
+      _(contents).must_match(/headers=/)
+      _(contents).must_match(/x-ratelimit-remaining-requests/)
+    end
+
+    it 'omits the headers block when headers default to {} (back-compat)' do
+      trace = Tyla::Infrastructure::LlmDebugLog.request(
+        provider: 'openai', model: 'gpt', endpoint: 'http://x', body: '{}'
+      )
+      Tyla::Infrastructure::LlmDebugLog.response(trace, status: '200', body: '{}')
+
+      _(contents).wont_match(/headers=/)
+    end
   end
 
   describe 'when LLM_DEBUG_LOG is a truthy flag' do

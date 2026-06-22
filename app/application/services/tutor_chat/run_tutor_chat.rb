@@ -39,6 +39,25 @@ module Tyla
       SESSION_LIMIT_RATIO   = 0.9
       SESSION_LIMIT_WARNING = 'session_limit_reached'
 
+      # Provider rate-limit pass-through (plan 2026-06-18 route C). A "remaining"
+      # axis (requests or tokens) at or below this floor is treated as tripped.
+      # ENV-overridable; default 2, calibrated against C3's GitHub Models
+      # measurement (the live fields are `x-ratelimit-remaining-requests` /
+      # `-tokens`, so tripped_rate_limit_dimension's name patterns hit directly).
+      # Shared by the hard-429 path (errors.limit_dimension) and the C2 soft path
+      # (provider_rate_limited warning) — one floor, one matcher, two callers.
+      PROVIDER_REMAINING_FLOOR = ENV.fetch('PROVIDER_REMAINING_FLOOR', '2').to_i
+
+      # C2 soft warning (plan 2026-06-18 route C §4.2). Emitted in `warnings` when
+      # the terminal tutor call's pass-through rate-limit headers show a remaining
+      # axis at or below PROVIDER_REMAINING_FLOOR — the account's rate window is
+      # nearly exhausted, but the turn still succeeded. ORTHOGONAL to
+      # SESSION_LIMIT_WARNING: that one means "this turn's input is too large →
+      # start a fresh conversation"; this one means "your key is being throttled →
+      # wait/back off" (a new conversation does NOT help — same account, same key).
+      # First version is a single flat token (no dimension suffix) — see §3.1.
+      PROVIDER_RATE_LIMIT_WARNING = 'provider_rate_limited'
+
       # Decision E (plan 2026-06-13 §2/§6 D1): the trigger case (round 2's two
       # redundant load_file actions both dropped) leaves actions=[]; if the model
       # also emitted no prose, the student would get a blank turn. The backend
@@ -245,8 +264,20 @@ module Tyla
         Success(reply)
       rescue Infrastructure::LlmError::Timeout
         Failure[:upstream_timeout, 'LLM request timed out']
+      rescue Infrastructure::LlmError::RateLimited => e
+        rate_limited_failure(e)
       rescue Infrastructure::LlmError::Upstream => e
         Failure[:upstream_error, e.message]
+      end
+
+      # 429 → :rate_limited (HTTP 429). `errors` carries the provider's back-off
+      # plus the §3.1 "which limit" labels: limit_scope is always 'provider_account'
+      # (429 is account-level, never conversation), limit_dimension is best-effort.
+      def rate_limited_failure(error)
+        Failure[:rate_limited, 'LLM provider rate limited',
+                { retry_after:     error.retry_after,
+                  limit_scope:     'provider_account',
+                  limit_dimension: tripped_rate_limit_dimension(error.rate_limit) || 'unknown' }]
       end
 
       # ── Plain helpers (no Result wrapping) ─────────────────────────────────────
@@ -273,6 +304,40 @@ module Tyla
         return false unless limit.positive?
 
         usage_count(terminal_round.usage, :input_tokens) >= (limit * SESSION_LIMIT_RATIO)
+      end
+
+      # best-effort: returns the tripped dimension ('requests'/'tokens'/'unknown'),
+      # or nil when nothing tripped. `rate_limit` is the schema-agnostic header bag
+      # (see RateLimitHeaders). Safe default: empty bag (unknown channel / no header)
+      # → nil. Shared by the hard-429 path (errors.limit_dimension) and, later, the
+      # C2 soft path.
+      def tripped_rate_limit_dimension(rate_limit)
+        return nil if rate_limit.nil? || rate_limit.empty?
+
+        name = lowest_tripped_remaining(rate_limit)
+        name && remaining_axis(name)
+      end
+
+      # Name of the smallest integer-valued "remaining" field that broke the floor,
+      # or nil. reset/retry-after lack "remaining" and are naturally excluded; a
+      # non-integer value (percent/string) is dropped.
+      def lowest_tripped_remaining(rate_limit)
+        tripped = rate_limit.filter_map do |name, value|
+          n = name.to_s.downcase
+          next unless n.include?('remaining')
+
+          v = Integer(value, exception: false)
+          [n, v] if v && v <= PROVIDER_REMAINING_FLOOR
+        end
+        tripped.min_by { |_n, v| v }&.first
+      end
+
+      # Infer the axis from the header name (§3.1); 'unknown' when it names neither.
+      def remaining_axis(name)
+        return 'requests' if name.include?('request')
+        return 'tokens'   if name.include?('token')
+
+        'unknown'
       end
 
       # Detection must cover BOTH parse paths (§1.3): native tool_calls and the
@@ -395,10 +460,15 @@ module Tyla
         # Decision E: never ship an empty content + empty actions turn (§6 D1). When
         # the gates cleared every action and the model gave no prose, inject a nudge.
         prose = FALLBACK_PROSE if blank_text?(prose) && actions.empty?
+        # C2 soft warning: read the TERMINAL round's own rate-limit bag. Data#with
+        # (used in finish_loop to fold Σ usage) only touches :usage, so reply.rate_limit
+        # is still round 2's header bag — no tuple plumbing through the mini-loop needed.
+        provider_rate_limited = !tripped_rate_limit_dimension(reply.rate_limit).nil?
         warnings = warnings_for(assembled, reference_loaded: reference_loaded,
                                            edit_file_redirected: edit_file_redirected,
                                            redundant_load_dropped: redundant_load_dropped,
-                                           approaching_limit: approaching_limit)
+                                           approaching_limit: approaching_limit,
+                                           provider_rate_limited: provider_rate_limited)
         dto = Response::TutorChat.new(
           log_id:   log.id,
           status:   verdict == :unavailable ? 'unavailable' : 'done',
@@ -419,7 +489,11 @@ module Tyla
       # `session_limit_reached` (2026-06-16) is independent of the trim flags: the
       # turn still succeeded, but its input has closed on the channel cap, so the
       # frontend should prompt the student to start a fresh conversation.
-      def warnings_for(assembled, reference_loaded:, edit_file_redirected:, redundant_load_dropped:, approaching_limit:)
+      # `provider_rate_limited` (2026-06-18 route C2) is likewise independent and,
+      # critically, ORTHOGONAL to session_limit_reached — its remedy is "back off",
+      # not "start a fresh conversation" (§3.1); the frontend must not merge them.
+      def warnings_for(assembled, reference_loaded:, edit_file_redirected:, redundant_load_dropped:,
+                       approaching_limit:, provider_rate_limited:)
         warnings = []
         warnings << 'reference_loaded'           if reference_loaded
         warnings << 'file_context_dropped'       if assembled.student_file_dropped
@@ -428,6 +502,7 @@ module Tyla
         warnings << 'edit_file_redirected'       if edit_file_redirected
         warnings << 'redundant_load_dropped'     if redundant_load_dropped
         warnings << SESSION_LIMIT_WARNING        if approaching_limit
+        warnings << PROVIDER_RATE_LIMIT_WARNING  if provider_rate_limited
         warnings
       end
     end

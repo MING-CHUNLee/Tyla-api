@@ -70,13 +70,14 @@ module Tyla
         }.merge(overrides)
       end
 
-      # Only the tutor LLM is called now — no guard arm.
-      def tutor_llm(content: 'tutor reply', usage: { input_tokens: 10, output_tokens: 5 })
+      # Only the tutor LLM is called now — no guard arm. `rate_limit` defaults to
+      # the empty bag (backward-compatible: existing tests build no rate-limit headers).
+      def tutor_llm(content: 'tutor reply', usage: { input_tokens: 10, output_tokens: 5 }, rate_limit: {})
         call_log = []
         client = Object.new
         client.define_singleton_method(:send_prompt) do |**kwargs|
           call_log << kwargs
-          Infrastructure::LlmResponse.new(content: content, usage: usage)
+          Infrastructure::LlmResponse.new(content: content, usage: usage, rate_limit: rate_limit)
         end
         client.define_singleton_method(:calls) { call_log }
         client
@@ -85,6 +86,19 @@ module Tyla
       def raising_tutor(error_class, message = 'boom')
         client = Object.new
         client.define_singleton_method(:send_prompt) { |**_kwargs| raise error_class, message }
+        client.define_singleton_method(:calls) { [] }
+        client
+      end
+
+      # Tutor client whose send_prompt raises a provider 429 (LlmError::RateLimited),
+      # carrying an explicit retry_after and rate-limit header bag.
+      def rate_limited_tutor(retry_after: '30', rate_limit: { 'x-ratelimit-remaining-requests' => '0' })
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          raise Infrastructure::LlmError::RateLimited.new(
+            'rate limited', retry_after: retry_after, rate_limit: rate_limit
+          )
+        end
         client.define_singleton_method(:calls) { [] }
         client
       end
@@ -401,6 +415,88 @@ module Tyla
         _(outcome.failure.first).must_equal :upstream_error
       end
 
+      # ── Provider rate-limit (plan 2026-06-18 route C1) ───────────────────────
+
+      it 'returns Failure[:rate_limited] with retry_after + provider_account scope on a 429' do
+        id      = seed_guard(attack_probability: 0.1)
+        outcome = call_with(request: request_for(id), llm_client: rate_limited_tutor(retry_after: '42'))
+
+        _(outcome).must_be :failure?
+        tag, _message, errors = outcome.failure
+        _(tag).must_equal :rate_limited
+        _(errors[:retry_after]).must_equal '42'
+        _(errors[:limit_scope]).must_equal 'provider_account'
+      end
+
+      it 'labels the 429 limit_dimension as "requests" from a remaining-requests header' do
+        id      = seed_guard(attack_probability: 0.1)
+        client  = rate_limited_tutor(rate_limit: { 'x-ratelimit-remaining-requests' => '0' })
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome.failure[2][:limit_dimension]).must_equal 'requests'
+      end
+
+      it 'falls back to limit_dimension "unknown" when only Retry-After is present (no remaining header)' do
+        id      = seed_guard(attack_probability: 0.1)
+        client  = rate_limited_tutor(rate_limit: { 'retry-after' => '30' })
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome.failure[2][:limit_dimension]).must_equal 'unknown'
+      end
+
+      it 'mini-loop: a round-2 429 surfaces as the :rate_limited failure' do
+        id     = seed_guard(attack_probability: 0.1)
+        count  = 0
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          count += 1
+          if count > 1
+            raise Infrastructure::LlmError::RateLimited.new(
+              'rate limited', retry_after: '30', rate_limit: { 'x-ratelimit-remaining-requests' => '0' }
+            )
+          end
+
+          Infrastructure::LlmResponse.new(content: 'r1', usage: { input_tokens: 1, output_tokens: 1 },
+                                          tool_calls: [{ 'type' => 'load_reference', 'name' => 'reference_solution' }])
+        end
+
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome).must_be :failure?
+        _(outcome.failure.first).must_equal :rate_limited
+      end
+
+      # ── tripped_rate_limit_dimension unit (shared by hard 429 + C2 soft path) ──
+
+      def dimension_for(bag)
+        RunTutorChat.new.send(:tripped_rate_limit_dimension, bag)
+      end
+
+      it 'tripped_rate_limit_dimension: infers "requests" from a low remaining-requests field' do
+        _(dimension_for('x-ratelimit-remaining-requests' => '0')).must_equal 'requests'
+      end
+
+      it 'tripped_rate_limit_dimension: infers "tokens" from a low remaining-tokens field' do
+        _(dimension_for('x-ratelimit-remaining-tokens' => '1')).must_equal 'tokens'
+      end
+
+      it 'tripped_rate_limit_dimension: when both axes are low it picks the smaller value\'s axis' do
+        _(dimension_for('x-ratelimit-remaining-requests' => '2',
+                        'x-ratelimit-remaining-tokens'   => '0')).must_equal 'tokens'
+      end
+
+      it 'tripped_rate_limit_dimension: a low remaining field with no request/token word is "unknown"' do
+        _(dimension_for('x-ratelimit-remaining' => '0')).must_equal 'unknown'
+      end
+
+      it 'tripped_rate_limit_dimension: returns nil when remaining is well above the floor' do
+        _(dimension_for('x-ratelimit-remaining-requests' => '500')).must_be_nil
+      end
+
+      it 'tripped_rate_limit_dimension: returns nil for an empty bag (unknown channel / no header)' do
+        _(dimension_for({})).must_be_nil
+      end
+
       it 'round-1 system prompt embeds persona, assignment, manifest and student file — but NOT the solution' do
         id       = seed_guard(attack_probability: 0.05)
         captured = nil
@@ -481,6 +577,66 @@ module Tyla
         _, dto = call_with(request: request_for(id), llm_client: client).value!
 
         _(dto.warnings).must_include 'session_limit_reached'
+        _(dto.warnings).must_include 'reference_loaded'
+      end
+
+      # ── Provider rate-limit soft warning (plan 2026-06-18 route C2) ──────────
+
+      it 'fills warnings with provider_rate_limited when the terminal reply reports a low remaining axis' do
+        id     = seed_guard(attack_probability: 0.1)
+        client = tutor_llm(content: 'ok', rate_limit: { 'x-ratelimit-remaining-requests' => '0' })
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(dto.warnings).must_include 'provider_rate_limited'
+      end
+
+      it 'leaves provider_rate_limited unset when the remaining quota is well above the floor' do
+        id     = seed_guard(attack_probability: 0.1)
+        client = tutor_llm(content: 'ok', rate_limit: { 'x-ratelimit-remaining-requests' => '500' })
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(Array(dto.warnings)).wont_include 'provider_rate_limited'
+      end
+
+      it 'leaves provider_rate_limited unset for an empty bag (unknown channel / no header) — safe default' do
+        id     = seed_guard(attack_probability: 0.1)
+        client = tutor_llm(content: 'ok', rate_limit: {})
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(Array(dto.warnings)).wont_include 'provider_rate_limited'
+      end
+
+      it 'provider_rate_limited is orthogonal to session_limit_reached — both can fire on one turn' do
+        id = seed_guard(attack_probability: 0.1)
+        # 7_500 ≥ 0.9 × 8_000 (session) AND remaining-requests 0 ≤ floor (provider).
+        client = tutor_llm(content: 'Wrapping up.',
+                           usage: { input_tokens: 7_500, output_tokens: 5 },
+                           rate_limit: { 'x-ratelimit-remaining-requests' => '0' })
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(dto.warnings).must_include 'session_limit_reached'
+        _(dto.warnings).must_include 'provider_rate_limited'
+      end
+
+      it 'reads the terminal (round-2) rate_limit, not round 1 — Σ-usage fold does not clobber it' do
+        id    = seed_guard(attack_probability: 0.1)
+        # Round 1's bag is healthy; round 2 (the terminal reply) is throttled. The
+        # warning must follow the terminal round, proving finish_loop's .with(usage:)
+        # left reply.rate_limit intact.
+        final = Infrastructure::LlmResponse.new(content: 'Compare your binwidths.',
+                                                usage: { input_tokens: 40, output_tokens: 20 },
+                                                rate_limit: { 'x-ratelimit-remaining-requests' => '0' })
+        round1 = Infrastructure::LlmResponse.new(
+          content:    'Let me consult the reference.',
+          usage:      { input_tokens: 10, output_tokens: 5 },
+          tool_calls: [{ 'type' => 'load_reference', 'name' => 'reference_solution' }],
+          rate_limit: { 'x-ratelimit-remaining-requests' => '500' }
+        )
+        client = scripted_llm(round1, final)
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(client.calls.size).must_equal 2
+        _(dto.warnings).must_include 'provider_rate_limited'
         _(dto.warnings).must_include 'reference_loaded'
       end
 

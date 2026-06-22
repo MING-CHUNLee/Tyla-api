@@ -114,4 +114,36 @@ describe Tyla::Infrastructure::AnthropicClient do
     _ { client.send_prompt(system_prompt: 's', user_message: 'u') }
       .must_raise Tyla::Infrastructure::LlmError::Timeout
   end
+
+  # ── Rate-limit pass-through (plan 2026-06-18 route C1) ──────────────────────
+
+  it 'raises LlmError::RateLimited on 429, carrying retry-after and the rate-limit bag' do
+    stub_request(:post, 'https://api.anthropic.com/v1/messages')
+      .to_return(
+        status: 429,
+        body: 'rate limited',
+        headers: { 'retry-after' => '15', 'anthropic-ratelimit-requests-remaining' => '0' }
+      )
+
+    err = _ { client.send_prompt(system_prompt: 's', user_message: 'u') }
+          .must_raise Tyla::Infrastructure::LlmError::RateLimited
+    _(err.retry_after).must_equal '15'
+    _(err.rate_limit['anthropic-ratelimit-requests-remaining']).must_equal '0'
+  end
+
+  it 'passes the Anthropic-prefixed rate-limit header through on success' do
+    stub_request(:post, 'https://api.anthropic.com/v1/messages')
+      .to_return(
+        status: 200,
+        body: {
+          content: [{ type: 'text', text: 'ok' }],
+          usage:   { input_tokens: 5, output_tokens: 2 }
+        }.to_json,
+        headers: { 'Content-Type' => 'application/json', 'anthropic-ratelimit-requests-remaining' => '9' }
+      )
+
+    resp = client.send_prompt(system_prompt: 'sys', user_message: 'hi')
+
+    _(resp.rate_limit['anthropic-ratelimit-requests-remaining']).must_equal '9'
+  end
 end
