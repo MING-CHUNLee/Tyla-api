@@ -41,10 +41,22 @@ module Tyla
 
       # Provider rate-limit pass-through (plan 2026-06-18 route C). A "remaining"
       # axis (requests or tokens) at or below this floor is treated as tripped.
-      # ENV-overridable; default 2, to be calibrated once C3 measures the real
-      # GitHub Models field values. Used here by the hard-429 path to label the
-      # 429's limit_dimension; the C2 soft-warning path will share it later.
+      # ENV-overridable; default 2, calibrated against C3's GitHub Models
+      # measurement (the live fields are `x-ratelimit-remaining-requests` /
+      # `-tokens`, so tripped_rate_limit_dimension's name patterns hit directly).
+      # Shared by the hard-429 path (errors.limit_dimension) and the C2 soft path
+      # (provider_rate_limited warning) — one floor, one matcher, two callers.
       PROVIDER_REMAINING_FLOOR = ENV.fetch('PROVIDER_REMAINING_FLOOR', '2').to_i
+
+      # C2 soft warning (plan 2026-06-18 route C §4.2). Emitted in `warnings` when
+      # the terminal tutor call's pass-through rate-limit headers show a remaining
+      # axis at or below PROVIDER_REMAINING_FLOOR — the account's rate window is
+      # nearly exhausted, but the turn still succeeded. ORTHOGONAL to
+      # SESSION_LIMIT_WARNING: that one means "this turn's input is too large →
+      # start a fresh conversation"; this one means "your key is being throttled →
+      # wait/back off" (a new conversation does NOT help — same account, same key).
+      # First version is a single flat token (no dimension suffix) — see §3.1.
+      PROVIDER_RATE_LIMIT_WARNING = 'provider_rate_limited'
 
       # Decision E (plan 2026-06-13 §2/§6 D1): the trigger case (round 2's two
       # redundant load_file actions both dropped) leaves actions=[]; if the model
@@ -448,10 +460,15 @@ module Tyla
         # Decision E: never ship an empty content + empty actions turn (§6 D1). When
         # the gates cleared every action and the model gave no prose, inject a nudge.
         prose = FALLBACK_PROSE if blank_text?(prose) && actions.empty?
+        # C2 soft warning: read the TERMINAL round's own rate-limit bag. Data#with
+        # (used in finish_loop to fold Σ usage) only touches :usage, so reply.rate_limit
+        # is still round 2's header bag — no tuple plumbing through the mini-loop needed.
+        provider_rate_limited = !tripped_rate_limit_dimension(reply.rate_limit).nil?
         warnings = warnings_for(assembled, reference_loaded: reference_loaded,
                                            edit_file_redirected: edit_file_redirected,
                                            redundant_load_dropped: redundant_load_dropped,
-                                           approaching_limit: approaching_limit)
+                                           approaching_limit: approaching_limit,
+                                           provider_rate_limited: provider_rate_limited)
         dto = Response::TutorChat.new(
           log_id:   log.id,
           status:   verdict == :unavailable ? 'unavailable' : 'done',
@@ -472,7 +489,11 @@ module Tyla
       # `session_limit_reached` (2026-06-16) is independent of the trim flags: the
       # turn still succeeded, but its input has closed on the channel cap, so the
       # frontend should prompt the student to start a fresh conversation.
-      def warnings_for(assembled, reference_loaded:, edit_file_redirected:, redundant_load_dropped:, approaching_limit:)
+      # `provider_rate_limited` (2026-06-18 route C2) is likewise independent and,
+      # critically, ORTHOGONAL to session_limit_reached — its remedy is "back off",
+      # not "start a fresh conversation" (§3.1); the frontend must not merge them.
+      def warnings_for(assembled, reference_loaded:, edit_file_redirected:, redundant_load_dropped:,
+                       approaching_limit:, provider_rate_limited:)
         warnings = []
         warnings << 'reference_loaded'           if reference_loaded
         warnings << 'file_context_dropped'       if assembled.student_file_dropped
@@ -481,6 +502,7 @@ module Tyla
         warnings << 'edit_file_redirected'       if edit_file_redirected
         warnings << 'redundant_load_dropped'     if redundant_load_dropped
         warnings << SESSION_LIMIT_WARNING        if approaching_limit
+        warnings << PROVIDER_RATE_LIMIT_WARNING  if provider_rate_limited
         warnings
       end
     end

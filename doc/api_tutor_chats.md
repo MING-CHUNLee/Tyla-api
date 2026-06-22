@@ -165,7 +165,7 @@ billed by `/guard_checks`; this route no longer calls the guard.
 | `content` | string | The tutor LLM's reply (or Socratic refusal text on `forbidden`) |
 | `actions` | array | **NEW (Workstream B).** Structured suggestions for the TUI to execute behind a human-approval gate. `[]` or omitted when the tutor has no concrete suggestion. **Never present on `forbidden`.** See [Actions](#actions). |
 | `usage` | object \| null | **Tutor-LLM tokens only** (CHANGED). **Σ over all tutor calls this turn** (1 normally, 2 when the reference solution was consulted — CHANGED 2026-06-12). `null` on `forbidden` (no tutor call). Always present on 2xx responses. |
-| `warnings` | string[] | **NEW (2026-06-11, §2.7).** Backend trim/redirect notices; **omitted entirely when empty** (older clients unaffected). Values: `"file_context_dropped"` — the live `file_context` did not fit the remaining input budget and was dropped whole (the tutor did not see the student's loaded files this turn); `"history_truncated"` — one or more oldest history turns were dropped by the newest-first trim; `"reference_loaded"` (**NEW 2026-06-12**) — the tutor consulted the instructor's reference solution server-side this turn (informational; the solution content itself is never returned); `"workspace_overview_dropped"` (**NEW 2026-06-12**) — the `workspace_overview` listing did not fit the input budget and was dropped whole; `"edit_file_redirected"` (**NEW 2026-06-12**) — the tutor asked to `edit_file` a path it had not loaded, so the backend rewrote that action to a `load_file` (see [Workspace edit gate](#workspace-edit-gate)); render it so the extra round-trip is explained, not silent; `"redundant_load_dropped"` (**NEW 2026-06-13**) — the tutor asked to `load_file` a path that is **already** loaded in `file_context` (or duplicated it within one reply), so the backend dropped that action (see [Redundant load gate](#redundant-load-gate)); when this is set and `actions` is now empty, read it as "the backend broke a load loop", not an error; `"session_limit_reached"` (**NEW 2026-06-16**) — this turn's assembled input has closed on the LLM channel's per-request input cap (≥ 90 %, measured against the tutor call's real `usage.input_tokens`). The turn still succeeded, but the conversation has effectively outgrown the window; render it as a prompt to the student to **wrap up and start a new conversation** rather than letting further turns silently drop older history (`history_truncated`) or hard-fail with `413`. The CLI surfaces these as status warnings. |
+| `warnings` | string[] | **NEW (2026-06-11, §2.7).** Backend trim/redirect notices; **omitted entirely when empty** (older clients unaffected). Values: `"file_context_dropped"` — the live `file_context` did not fit the remaining input budget and was dropped whole (the tutor did not see the student's loaded files this turn); `"history_truncated"` — one or more oldest history turns were dropped by the newest-first trim; `"reference_loaded"` (**NEW 2026-06-12**) — the tutor consulted the instructor's reference solution server-side this turn (informational; the solution content itself is never returned); `"workspace_overview_dropped"` (**NEW 2026-06-12**) — the `workspace_overview` listing did not fit the input budget and was dropped whole; `"edit_file_redirected"` (**NEW 2026-06-12**) — the tutor asked to `edit_file` a path it had not loaded, so the backend rewrote that action to a `load_file` (see [Workspace edit gate](#workspace-edit-gate)); render it so the extra round-trip is explained, not silent; `"redundant_load_dropped"` (**NEW 2026-06-13**) — the tutor asked to `load_file` a path that is **already** loaded in `file_context` (or duplicated it within one reply), so the backend dropped that action (see [Redundant load gate](#redundant-load-gate)); when this is set and `actions` is now empty, read it as "the backend broke a load loop", not an error; `"session_limit_reached"` (**NEW 2026-06-16**) — this turn's assembled input has closed on the LLM channel's per-request input cap (≥ 90 %, measured against the tutor call's real `usage.input_tokens`). The turn still succeeded, but the conversation has effectively outgrown the window; render it as a prompt to the student to **wrap up and start a new conversation** rather than letting further turns silently drop older history (`history_truncated`) or hard-fail with `413`; `"provider_rate_limited"` (**NEW 2026-06-18, route C**) — the provider's pass-through rate-limit headers show the account/key's rate window (per-minute / per-day) closing on its quota; the turn still succeeded, but the key is about to be throttled. **Orthogonal to `session_limit_reached`, and its remedy is the OPPOSITE** — "wait / back off", *not* "start a new conversation" (a new conversation reuses the same key against the same quota); render it on a distinct path with distinct copy (see [Which limit](#which-limit-scope--dimension)). The CLI surfaces these as status warnings. |
 
 ---
 
@@ -351,8 +351,9 @@ All error responses share the common envelope used by the rest of the API:
 | `400` | `bad_request` | Body field validation failed (missing field incl. `guard_log_id`, wrong type, history > 500 KB) |
 | `403` | `forbidden` | `X-LLM-Key` header is absent or empty |
 | `404` | `not_found` | An assignment artefact file is missing on disk |
+| `429` | `rate_limited` | **NEW (2026-06-18, route C).** The tutor LLM provider returned `429` — the account's rate-limit window is exhausted. `errors.retry_after` (and, when present, the `Retry-After` response header) carries the suggested back-off in seconds; `errors.limit_scope` is always `"provider_account"`; `errors.limit_dimension` is best-effort `"requests"` / `"tokens"` / `"unknown"` (see [Which limit](#which-limit-scope--dimension)). **Distinct from `502 upstream_error`** — this is a back-off signal, not a hard failure: wait and retry, do not hammer-retry (that hits the limit faster). |
 | `500` | `internal_error` | Database write failed |
-| `502` | `upstream_error` | The tutor LLM call returned a non-2xx |
+| `502` | `upstream_error` | The tutor LLM call returned a non-2xx **other than 429** |
 | `504` | `upstream_timeout` | The tutor LLM call timed out (>30 s) |
 
 > **Why `403` and not `401`?** The presence of an `X-LLM-Key` header is a
@@ -360,6 +361,63 @@ All error responses share the common envelope used by the rest of the API:
 > not a server-issued credential check. `403 Forbidden` is the correct
 > mapping: the request is well-formed and the server understood it, but the
 > client did not supply the credential the operation requires.
+
+### Provider rate-limited — `status: "rate_limited"` (`429 Too Many Requests`)
+
+**NEW (2026-06-18, route C).** The tutor LLM provider returned `429`: the API key's
+rate-limit window (per-minute / per-day request or token quota) is exhausted. The turn
+could not complete, so this is a failure response — but a **recoverable** one, semantically
+the opposite of a `502`. Back off and retry; do **not** treat it as a hard error or retry
+immediately (an immediate retry just hits the limit again, faster).
+
+```json
+{
+  "status":  "rate_limited",
+  "message": "LLM provider rate limited",
+  "errors": {
+    "retry_after":     "30",
+    "limit_scope":     "provider_account",
+    "limit_dimension": "requests"
+  }
+}
+```
+
+| `errors` field | Type | Meaning |
+|---|---|---|
+| `retry_after` | string \| null | Suggested back-off in seconds, taken from the provider's `Retry-After`. **Also echoed as the `Retry-After` response header** when present, so a client can back off without parsing the body; the body field is the fallback. `null` when the provider sent no `Retry-After`. |
+| `limit_scope` | string | Always `"provider_account"` for a 429 — it is an account/key-level rate window, **never** conversation-level (see [Which limit](#which-limit-scope--dimension)). |
+| `limit_dimension` | string | Best-effort `"requests"` / `"tokens"` / `"unknown"`, inferred from the provider's `*remaining*` headers. `"unknown"` when the provider sent only `Retry-After` (no remaining axis to read). |
+
+> **Deployment note (2026-06-18).** Each student supplies their own key, so a 429 is *that
+> student's* quota — the message can be direct ("your key is rate-limited, wait ~N s"),
+> no "maybe someone else exhausted it" hedge needed.
+
+---
+
+## Which limit (scope / dimension)
+
+**NEW (2026-06-18, route C §3.1).** Three different "limits" can be in play, and they are
+**not** interchangeable. The response keeps them on **separate signals** so the frontend
+never gives the wrong remedy:
+
+| Limit (`limit_scope`) | Signal | Surfaced as | What it means | Remedy |
+|---|---|---|---|---|
+| `per_request` | `session_limit_reached` | `warnings[]` (turn still `done`) | *This single turn's* assembled input has closed on the model's per-request context window | **Start a fresh conversation** — a new conversation empties the history, freeing the window |
+| `provider_account` | `provider_rate_limited` (soft) / `rate_limited` (hard 429) | `warnings[]` (soft) / `429` body `errors` (hard) | *Your key's* rate window (per-minute / per-day requests or tokens) is near / past its quota | **Wait / back off** — a fresh conversation does **not** help; it reuses the same key against the same quota |
+| `conversation` | — (**never emitted**) | — | A running per-conversation token tally | n/a — the backend does **not** track this and the provider does not report it; route B was deliberately not built |
+
+> **⚠️ The two active signals demand OPPOSITE actions.** `session_limit_reached` says "start
+> a new conversation"; `provider_rate_limited` / `429` says "wait — a new conversation makes
+> it *worse*". They can fire on the same turn. **Never merge them into one "you hit a limit,
+> start over" message** — that gives `rate_limited` exactly the wrong advice. Render them on
+> distinct paths with distinct copy. See [§6 of the route-C plan](../plans/2026-06-18-provider-rate-limit-passthrough.md).
+
+> The backend **never** labels a route-C signal `conversation`-level. A 429 / `provider_rate_limited`
+> is an account rate window that resets on its own period; it is **not** "this conversation got
+> too long" (that is `session_limit_reached`, a different scope). The `limit_dimension`
+> sub-label (`requests` / `tokens` / `unknown`) lets the frontend sharpen 429 copy
+> ("your per-minute **request** quota is spent" vs "your **token** quota is spent"); fall back
+> to generic wording on `unknown`.
 
 ---
 
@@ -503,6 +561,12 @@ Do **not** ship the CLI first: a backend that predates `workspace_overview` woul
   prompt), never in the HTTP response: the tool is filtered from `actions`, and the
   solution text is injected only into the round-2 system prompt. The only client-visible
   trace is the content-free `"reference_loaded"` warning.
+- **Rate-limit headers are generic pass-through (2026-06-18, route C).** The backend keeps
+  every response header whose name contains `ratelimit` (plus `Retry-After`) and surfaces them
+  as the `rate_limited` / `provider_rate_limited` signals — it does **not** hard-code any one
+  provider's field schema (OpenAI, Anthropic, and GitHub Models all name them differently). The
+  `X-LLM-Key` request header is never written to any log, including the optional wire-level
+  debug log.
 - **Trust without a second guard call.** The `guard_log_id` verification (log exists,
   status ∈ {`done`, `unavailable`}, stored prompt matches) is a DB read that preserves the
   skip/fabricate-resistant trust boundary the old internal guard provided, at no token

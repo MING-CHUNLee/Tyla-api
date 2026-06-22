@@ -120,9 +120,9 @@ DEV 想（if possible）在訊號裡附上「撞到的是**哪一種** limit」�
 |---|---|---|
 | `requests` | 名稱含 `...remaining-requests` / `requests-remaining...` | OpenAI `x-ratelimit-remaining-requests`、Anthropic `anthropic-ratelimit-requests-remaining` |
 | `tokens` | 名稱含 `...remaining-tokens` / `tokens-remaining...` | `x-ratelimit-remaining-tokens` |
-| `unknown` | 撈不到可辨識的 remaining 欄位（或 429 只給 `Retry-After`、無 body 線索）| GitHub 確切欄位待 **C3** 量 |
+| `unknown` | 撈不到可辨識的 remaining 欄位（或 429 只給 `Retry-After`、無 body 線索）| — |
 
-（`limit_window`：`per_minute` / `per_day` / `unknown` —— GitHub 免費層 requests 同時有每分與每日兩窗，單一 header 未必分得出，預設 `unknown`、待 C3。第一版可先不發 window，只發 scope + dimension。）
+（`limit_window`：`per_minute` / `per_day` / `unknown` —— C3 實測確認 GitHub Models 的 `x-ratelimit-renewalperiod-*` = `60`（秒），可從此欄推出 `per_minute`；若欄位缺失則 fallback `unknown`。第一版可先不發 window，只發 scope + dimension。）
 
 **承載方式（依硬/軟分流）：**
 - **硬 429** → 塞進**已經結構化**的 `errors`：`{ retry_after, limit_scope: 'provider_account', limit_dimension: 'requests'|'tokens'|'unknown' }`。**零新合約欄位**（`errors` 本就是任意結構 payload，representer 已 `property :errors`）。
@@ -454,22 +454,42 @@ LlmDebugLog.response(trace, status: response.code, body: response.body, headers:
 ## 11. 落地檢查清單
 
 **第一批 — C1 + 透傳 plumbing + C3（獨立的正確性修復，可單獨開 PR / 驗收，不依賴 MAX_USAGE 功能）**
-- [ ] `rate_limit_headers.rb` 新檔 + spec
-- [ ] `LlmError::RateLimited`（帶 retry_after/rate_limit）
-- [ ] `LlmResponse` 加 `rate_limit`（預設 `{}`）
-- [ ] 兩個 client `parse`：撈 header、429 → `RateLimited`、成功帶 `rate_limit`
-- [ ] 兩個 client `post_json`：debug log 帶 `headers:`
-- [ ] `LlmDebugLog.response` 加 `headers:`（預設 `{}`）
-- [ ] service `request_tutor_reply` rescue `RateLimited → :rate_limited`，`errors` 帶 `retry_after` + `limit_scope: 'provider_account'` + best-effort `limit_dimension`（§3.1）
-- [ ] service `tripped_rate_limit_dimension` helper（硬路徑先用；C2 軟路徑共用）
-- [ ] `api.rb` / `result.rb` / `http_response.rb` 串 429（`too_many_requests`）
-- [ ] client/debug-log/result/http_response spec
-- [ ] 開 `LLM_DEBUG_LOG` 對真實 GitHub Models 量一次 header
+- [x] `rate_limit_headers.rb` 新檔 + spec
+- [x] `LlmError::RateLimited`（帶 retry_after/rate_limit）
+- [x] `LlmResponse` 加 `rate_limit`（預設 `{}`）
+- [x] 兩個 client `parse`：撈 header、429 → `RateLimited`、成功帶 `rate_limit`
+- [x] 兩個 client `post_json`：debug log 帶 `headers:`
+- [x] `LlmDebugLog.response` 加 `headers:`（預設 `{}`）
+- [x] service `request_tutor_reply` rescue `RateLimited → :rate_limited`，`errors` 帶 `retry_after` + `limit_scope: 'provider_account'` + best-effort `limit_dimension`（§3.1）
+- [x] service `tripped_rate_limit_dimension` helper（硬路徑先用；C2 軟路徑共用）
+- [x] `api.rb` / `result.rb` / `http_response.rb` 串 429（`too_many_requests`）
+- [x] client/debug-log/result/http_response spec
+- [x] 開 `LLM_DEBUG_LOG` 對真實 GitHub Models 量一次 header　← **已完成 2026-06-22**
+  - Script: `scripts/measure_github_models_headers.rb`
+  - **實測結果（`gpt-4o-mini` via `models.inference.ai.azure.com`，2026-06-22）：**
+    ```
+    x-ratelimit-limit-requests:      20000
+    x-ratelimit-remaining-requests:  19999
+    x-ratelimit-reset-requests:      0        ← 秒數（非 Unix ts），0 = 當下窗口未耗盡
+    x-ratelimit-limit-tokens:        2000000
+    x-ratelimit-remaining-tokens:    1999976
+    x-ratelimit-reset-tokens:        0
+    x-ratelimit-renewalperiod-requests: 60    ← 每 60 秒重置 → limit_window = per_minute
+    x-ratelimit-renewalperiod-tokens:   60
+    x-ratelimit-key:                 gpt-4o-mini   ← model-scoped key
+    x-ratelimit-abusepenalty-active: False
+    ```
+  - **結論：**
+    - `tripped_rate_limit_dimension` 的 `remaining-requests` / `remaining-tokens` pattern **直接命中**，不需調整。
+    - `x-ratelimit-renewalperiod-*` = `60` → `limit_window` 可從此欄推出 `per_minute`（C2 optional）。
+    - `reset-*` 值是「距重置的秒數」而非 Unix timestamp。
+    - 正常回應**不帶 `retry-after`**；429 時才會出現。
+    - ⚠️ 回應含 `deprecation`/`sunset`/`link` header（舊 Azure endpoint 將於 2025-10-17 sunset）；endpoint 已改換 `https://github.models.ai/inference`。本測試仍走舊端點但結果有效。
 
-**第二批 — C2 軟警告（C3 量完欄位後再做）**
-- [ ] service 常數（`PROVIDER_RATE_LIMIT_WARNING`/`PROVIDER_REMAINING_FLOOR`）+ `ok_outcome`/`warnings_for` 串接（軟路徑共用第一批的 `tripped_rate_limit_dimension`）
-- [ ] service spec（觸發/未觸發/空 bag/與 session 正交/mini-loop 終端輪）
-- [ ] `doc/api_tutor_chats.md`（429 列 + `errors.limit_scope`/`limit_dimension` + `provider_rate_limited` warning + 「Which limit」taxonomy 小段 + 語意警語）
+**第二批 — C2 軟警告（C3 量完欄位後再做）　← 已完成 2026-06-22**
+- [x] service 常數（`PROVIDER_RATE_LIMIT_WARNING`/`PROVIDER_REMAINING_FLOOR`）+ `ok_outcome`/`warnings_for` 串接（軟路徑共用第一批的 `tripped_rate_limit_dimension`；`ok_outcome` 直讀終端輪 `reply.rate_limit`，`finish_loop` 的 `.with(usage:)` 不蓋 rate_limit）
+- [x] service spec（觸發/未觸發/空 bag/與 session 正交/mini-loop 終端輪）
+- [x] `doc/api_tutor_chats.md`（429 列 + `errors.limit_scope`/`limit_dimension` + `provider_rate_limited` warning + 「Which limit」taxonomy 小段 + 語意警語）
 
 **前端 track（另開，不屬本批 — §6 為其規格）**
 - [ ] 429 退避分支（讀 `Retry-After`/`errors.retry_after`）
