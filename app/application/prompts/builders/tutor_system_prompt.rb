@@ -41,12 +41,34 @@ module Tyla
 
       # Decision rules for when to call each tool. Format instructions are
       # handled by the tool_use API — not needed in the prompt.
-      TOOL_USE_GUIDE = <<~GUIDE.strip
-        ## Tool Use Guide
-        Call `edit_file` ONLY when the target file is shown in the "Student Workspace (live)" section with real "N| " line numbers — set `start_line` to the line number shown and put plain code (no "N| " prefix) in `search`, and apply the fix directly without asking first. If the file appears only in the "Student Workspace (overview)" section, is not shown at all, or the student merely pasted code into the chat, call `load_file` FIRST and wait for its numbered contents — never guess line numbers or invent a "N| " prefix.
-        Call `execute_script` when the student asks for a demo, example, or step-by-step illustration — provide the R code directly without asking for confirmation first.
-        Call `load_file` when you need a workspace file that is not yet in the "Student Workspace (live)" section (listed only in the overview, or not shown). Its contents arrive next turn; do not edit it before then.
-        Call `load_reference` when the question concerns how to approach, structure, improve, or check the homework. Do NOT call it for purely logistical questions (deadlines, submission format).
+      #
+      # MS3 plan §7.1.2: the guide is no longer one frozen monolith. Each tool's
+      # rule is a standalone fragment, so `build` can assemble only the fragments
+      # for the tools a persona actually holds (`profile.tools`). A persona with no
+      # tools (tier3) renders NO "## Tool Use Guide" section at all — otherwise the
+      # prompt would instruct it to call tools it does not have, contradicting its
+      # Forbidden section. For the full toolset the assembled text is byte-identical
+      # to the previous monolith (fragment order preserved), so tier1 is unchanged.
+      TOOL_GUIDE_HEADER = '## Tool Use Guide'
+
+      TOOL_GUIDE_FRAGMENTS = {
+        'edit_file' => <<~FRAG.strip,
+          Call `edit_file` ONLY when the target file is shown in the "Student Workspace (live)" section with real "N| " line numbers — set `start_line` to the line number shown and put plain code (no "N| " prefix) in `search`, and apply the fix directly without asking first. If the file appears only in the "Student Workspace (overview)" section, is not shown at all, or the student merely pasted code into the chat, call `load_file` FIRST and wait for its numbered contents — never guess line numbers or invent a "N| " prefix.
+        FRAG
+        'execute_script' => <<~FRAG.strip,
+          Call `execute_script` when the student asks for a demo, example, or step-by-step illustration — provide the R code directly without asking for confirmation first.
+        FRAG
+        'load_file' => <<~FRAG.strip,
+          Call `load_file` when you need a workspace file that is not yet in the "Student Workspace (live)" section (listed only in the overview, or not shown). Its contents arrive next turn; do not edit it before then.
+        FRAG
+        'load_reference' => <<~FRAG.strip
+          Call `load_reference` when the question concerns how to approach, structure, improve, or check the homework. Do NOT call it for purely logistical questions (deadlines, submission format).
+        FRAG
+      }.freeze
+
+      # Common closing rules, appended ONLY when at least one tool fragment is
+      # present (a tutor with no tools has nothing to call, so none of this applies).
+      TOOL_GUIDE_COMMON = <<~GUIDE.strip
         Do NOT offer to run code as a follow-up question ("Would you like me to..."). If code would help, call the tool immediately.
         If you have no concrete code to act on, or when refusing, do not call any tool.
         The conversation history is a record of past turns; edits it describes were proposals and the student may have changed those files since. When the history conflicts with the current "Student Workspace (live)" section, always treat the live section as the source of truth.
@@ -81,16 +103,41 @@ module Tyla
         - When quoting code in your explanation to the student, omit the prefixes.
       GUIDE
 
+      # `profile` (MS3 plan §7.1.2/§7.2) gates three things: which tool-guide
+      # fragments render (`profile.tool_names`), whether the course-materials
+      # manifest + reference solution render (`inject_reference`), and whether the
+      # workspace/line-number blocks render (`inject_workspace`). A nil profile
+      # preserves the pre-MS3 full behaviour (all four tools, both injections on),
+      # which keeps tier1 and the existing callers/specs unchanged.
       def self.build(policy_text:, solution_text:, context_files:, live_context: nil,
-                     workspace_overview: nil, assignment_text: nil)
+                     workspace_overview: nil, assignment_text: nil, profile: nil)
+        inject_reference = profile.nil? || profile.inject_reference
+        inject_workspace = profile.nil? || profile.inject_workspace
+        tool_names       = profile ? profile.tool_names : TOOL_GUIDE_FRAGMENTS.keys
+
         parts = [policy_text]
         parts << "## Assignment\n#{assignment_text}" unless blank?(assignment_text)
-        parts << (blank?(solution_text) ? COURSE_MATERIALS_MANIFEST : MANIFEST_SOLUTION_LOADED)
-        parts << "## Reference Solution\n#{solution_text}" unless blank?(solution_text)
-        parts.concat(workspace_parts(live_context, workspace_overview, context_files))
-        parts << TOOL_USE_GUIDE
+        if inject_reference
+          parts << (blank?(solution_text) ? COURSE_MATERIALS_MANIFEST : MANIFEST_SOLUTION_LOADED)
+          parts << "## Reference Solution\n#{solution_text}" unless blank?(solution_text)
+        end
+        parts.concat(workspace_parts(live_context, workspace_overview, context_files)) if inject_workspace
+        guide = tool_use_guide(tool_names)
+        parts << guide unless guide.nil?
         parts.join("\n\n---\n\n")
       end
+
+      # Assemble the "## Tool Use Guide" from only the fragments for `tool_names`,
+      # in the canonical fragment order (not the persona's tool order), so the full
+      # toolset reproduces the historical monolith verbatim. nil when the persona
+      # holds no tools — the section is omitted entirely (tier3).
+      def self.tool_use_guide(tool_names)
+        fragments = TOOL_GUIDE_FRAGMENTS.filter_map { |name, frag| frag if tool_names.include?(name) }
+        return nil if fragments.empty?
+
+        ([TOOL_GUIDE_HEADER] + fragments + [TOOL_GUIDE_COMMON]).join("\n")
+      end
+      private_class_method :tool_use_guide
 
       # The overview (manifest) and the live (loaded contents) sections coexist;
       # the fixture block is a Phase-1 fallback rendered only when the frontend

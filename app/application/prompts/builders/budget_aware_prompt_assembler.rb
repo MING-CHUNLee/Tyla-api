@@ -44,15 +44,28 @@ module Tyla
 
       def self.call(persona:, assignment:, solution:, student_file:, history:,
                     user_prompt:, endpoint:, file_context: nil, workspace_overview: nil,
-                    include_solution: false, session_turns: nil)
+                    include_solution: false, session_turns: nil, profile: nil)
         budget = Values::TokenBudget.for(endpoint: endpoint)
+
+        # MS3 plan §7.2: a persona with `inject_workspace=false` (tier3) sees NO
+        # workspace at all — no overview, no live file_context, no fixture fallback.
+        # Gate the whole droppable-workspace stage on it; a nil profile keeps the
+        # pre-MS3 behaviour (workspace injected), so existing callers are unchanged.
+        inject_workspace = profile.nil? || profile.inject_workspace
 
         # Option C (plan 2026-06-15 §4.3): when the frontend sends rich
         # `session_turns`, the backend owns history compression — flatten each
         # turn into deterministic [{role, content}] pairs (file contents omitted)
         # *before* trimming, so trim estimates the compressed cost. Absent
         # `session_turns`, fall back to the legacy pre-compressed `history`.
-        history = build_history(history, session_turns)
+        #
+        # MS3 §7.3 vulnerability 3: inject_workspace=false (tier3) only silences the
+        # SYSTEM prompt's workspace block — history is assembled here, independently.
+        # A turn's `context_headers` would otherwise surface as a "[Previously
+        # inspected … : <paths>]" note, leaking workspace filenames to a persona that
+        # can see no files. Strip them before serializing so tier3 history carries no
+        # workspace reference.
+        history = build_history(history, session_turns, inject_workspace: inject_workspace)
 
         base_tokens =
           Values::Tokenizer.estimate(persona) +
@@ -82,8 +95,9 @@ module Tyla
         workspace_dropped = false
         overview_dropped  = false
 
-        # 1. workspace_overview — the cheap manifest, budgeted first.
-        unless workspace_overview.nil? || workspace_overview.empty?
+        # 1. workspace_overview — the cheap manifest, budgeted first. Skipped whole
+        #    when inject_workspace=false (tier3): no overview at all.
+        if inject_workspace && !(workspace_overview.nil? || workspace_overview.empty?)
           ov_tokens = Values::Tokenizer.estimate(workspace_overview)
           if ov_tokens <= remaining
             overview   = workspace_overview
@@ -94,8 +108,9 @@ module Tyla
         end
 
         # 2. file_context (loaded contents), or — only when the frontend sent NO
-        #    workspace info at all — the Phase-1 fixture student file.
-        if !file_context.nil? && !file_context.empty?
+        #    workspace info at all — the Phase-1 fixture student file. Both branches
+        #    are skipped when inject_workspace=false (tier3 sees no workspace).
+        if inject_workspace && !file_context.nil? && !file_context.empty?
           fc_tokens = Values::Tokenizer.estimate(file_context)
           if fc_tokens <= remaining
             live_context = strip_section_headings(file_context)
@@ -103,7 +118,7 @@ module Tyla
           else
             workspace_dropped = true   # dropped whole; freed budget flows to history
           end
-        elsif workspace_overview.nil? || workspace_overview.empty?
+        elsif inject_workspace && (workspace_overview.nil? || workspace_overview.empty?)
           student_content = student_file && (student_file[:content] || student_file['content'])
           student_path    = student_file && (student_file[:path]    || student_file['path'])
 
@@ -126,7 +141,8 @@ module Tyla
           solution_text:      include_solution ? solution : nil,
           context_files:      included_files,
           live_context:       live_context,
-          workspace_overview: overview
+          workspace_overview: overview,
+          profile:            profile
         )
 
         Result.new(
@@ -144,10 +160,15 @@ module Tyla
       # Flatten Option C `session_turns` into [{role, content}] pairs, or pass the
       # legacy pre-compressed `history` through unchanged. The serializer is
       # deterministic and emits user-first pairs (or skips degenerate turns).
-      def self.build_history(history, session_turns)
+      # When `inject_workspace` is false (tier3), each turn's `context_headers` is
+      # stripped first so no seen-path note reaches a persona that sees no files (§7.3).
+      def self.build_history(history, session_turns, inject_workspace: true)
         turns = Array(session_turns)
         return Array(history) if turns.empty?
 
+        # tier3: drop each turn's `context_headers` (string OR symbol key) so the
+        # serializer emits no "Previously inspected … : <paths>" workspace reference.
+        turns = turns.map { |t| t.reject { |k, _| k.to_s == 'context_headers' } } unless inject_workspace
         turns.flat_map { |turn| Values::HistoryTurnSerializer.call(turn) }
       end
       private_class_method :build_history
