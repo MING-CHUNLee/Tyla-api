@@ -6,8 +6,6 @@ require_relative '../../../spec_helper'
   app/infrastructure/filesystem/tutor_chat/assignment_loader.rb
   app/infrastructure/filesystem/tutor_chat/solution_loader.rb
   app/infrastructure/filesystem/tutor_chat/student_file_loader.rb
-  app/infrastructure/filesystem/tutor_chat/tutor_persona_loader.rb
-  app/infrastructure/filesystem/tutor_chat/refusal_loader.rb
 ].each { |f| require File.join(ROOT, f) }
 
 module Tyla
@@ -30,23 +28,13 @@ module Tyla
           _(StudentFileLoader::FILENAME).must_equal 'Hw2.Rmd'
         end
 
-        it 'TutorPersonaLoader reads the tutor-guide TUTOR.md fixture' do
-          text = TutorPersonaLoader.load('HW2')
-          _(text).must_include 'Tutor-Guide Mode'
-        end
+        # NOTE: persona + refusal loading moved to TutorPersonaResolver (MS3 §7.1.1);
+        # see tutor_persona_resolver_spec.rb. The two single-file loaders are retired.
 
-        it 'RefusalLoader extracts the ## Refusal Message section from TUTOR.md' do
-          text = RefusalLoader.load('HW2')
-          _(text).wont_be_empty
-          _(text).must_include "Let's work through this together"
-        end
-
-        it 'all five loaders ignore project_id in Phase 1' do
+        it 'the remaining loaders ignore project_id in Phase 1' do
           _(AssignmentLoader.load('anything')).wont_be_empty
           _(SolutionLoader.load('anything')).wont_be_empty
           _(StudentFileLoader.load('anything')).wont_be_empty
-          _(TutorPersonaLoader.load('anything')).wont_be_empty
-          _(RefusalLoader.load('anything')).wont_be_empty
         end
       end
     end

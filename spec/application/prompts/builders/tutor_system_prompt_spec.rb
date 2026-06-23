@@ -2,6 +2,12 @@
 
 require_relative '../../../spec_helper'
 
+# Domain values back the per-persona profile gating (MS3 plan §7.1.2/§7.2).
+%w[
+  app/domain/values/tutor_tools.rb
+  app/domain/values/persona_profile.rb
+].each { |f| require File.join(ROOT, f) }
+
 describe Tyla::Prompts::TutorSystemPrompt do
   describe '.build' do
     it 'returns the policy text (plus the tool use guide) when no solution or files provided' do
@@ -248,6 +254,75 @@ describe Tyla::Prompts::TutorSystemPrompt do
       )
       _(result).wont_include '(truncated'
       _(result).must_include 'line499'
+    end
+  end
+
+  # MS3 plan §7.1.2/§7.2: the per-persona profile gates the tool-guide fragments,
+  # the course-materials manifest, and the workspace blocks.
+  describe '.build with a persona profile' do
+    def profile(tool_names, inject_workspace:, inject_reference:)
+      Tyla::Values::PersonaProfile.new(
+        tools:            Tyla::Values::TutorTools.named(tool_names),
+        inject_workspace: inject_workspace,
+        inject_reference: inject_reference
+      )
+    end
+
+    it 'tier2 (load_file + load_reference): guide names those tools, NOT edit/execute' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text:        'POLICY',
+        solution_text:      '',
+        context_files:      [],
+        workspace_overview: 'R scripts (.R): hw2.R',
+        profile:            profile(%w[load_file load_reference], inject_workspace: true, inject_reference: true)
+      )
+      guide = result.split('## Tool Use Guide').last
+      _(guide).must_include 'load_file'
+      _(guide).must_include 'load_reference'
+      _(guide).wont_include 'Call `edit_file`'
+      _(guide).wont_include 'Call `execute_script`'
+      # inject flags still on → manifest + workspace render.
+      _(result).must_include '## Available Course Materials'
+      _(result).must_include '## Student Workspace (overview)'
+    end
+
+    it 'tier3 (no tools, no injection): omits the tool guide, the manifest, and all workspace blocks' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text:        'POLICY',
+        solution_text:      '',
+        context_files:      [{ path: 'hw.R', content: 'FIXTURE_WIP' }],
+        live_context:       '1| x <- 1',
+        workspace_overview: 'R scripts (.R): hw2.R',
+        profile:            profile([], inject_workspace: false, inject_reference: false)
+      )
+      _(result).must_include 'POLICY'
+      _(result).wont_include '## Tool Use Guide'
+      _(result).wont_include '## Available Course Materials'
+      _(result).wont_include '## Student Workspace'
+      _(result).wont_include 'FIXTURE_WIP'
+    end
+
+    it 'inject_reference=false drops the manifest even when a solution is supplied' do
+      result = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text:   'POLICY',
+        solution_text: 'SOL',
+        context_files: [],
+        profile:       profile([], inject_workspace: false, inject_reference: false)
+      )
+      _(result).wont_include '## Available Course Materials'
+      _(result).wont_include '## Reference Solution'
+    end
+
+    it 'tier1 (full toolset, both injections) reproduces the default monolith verbatim' do
+      full = profile(%w[load_file edit_file execute_script load_reference],
+                     inject_workspace: true, inject_reference: true)
+      with_profile = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY', solution_text: '', context_files: [], profile: full
+      )
+      without_profile = Tyla::Prompts::TutorSystemPrompt.build(
+        policy_text: 'POLICY', solution_text: '', context_files: []
+      )
+      _(with_profile).must_equal without_profile
     end
   end
 end
