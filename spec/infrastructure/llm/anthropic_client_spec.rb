@@ -146,4 +146,20 @@ describe Tyla::Infrastructure::AnthropicClient do
 
     _(resp.rate_limit['anthropic-ratelimit-requests-remaining']).must_equal '9'
   end
+
+  # ── Input-too-large no-op (plan 2026-06-24 route D §9) ──────────────────────
+  # Anthropic signals context overflow with a 400 invalid_request_error, not a 413,
+  # so the 413 InputTooLarge guard must NOT fire here — the 400 stays a generic Upstream.
+
+  it 'raises LlmError::Upstream (not InputTooLarge) on a 400 context-too-large error' do
+    stub_request(:post, 'https://api.anthropic.com/v1/messages')
+      .to_return(
+        status: 400,
+        body: { error: { type: 'invalid_request_error', message: 'prompt is too long' } }.to_json
+      )
+
+    err = _ { client.send_prompt(system_prompt: 's', user_message: 'u') }
+          .must_raise Tyla::Infrastructure::LlmError::Upstream
+    _(err.message).must_match(/400/)
+  end
 end

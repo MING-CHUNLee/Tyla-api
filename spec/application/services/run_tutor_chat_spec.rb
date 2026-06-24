@@ -102,6 +102,19 @@ module Tyla
         client
       end
 
+      # Tutor client whose send_prompt raises a provider 413 (LlmError::InputTooLarge),
+      # carrying the parsed per-model cap (nil when the provider omitted it).
+      def input_too_large_tutor(max_input_tokens: 8_000)
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          raise Infrastructure::LlmError::InputTooLarge.new(
+            'input too large', max_input_tokens: max_input_tokens, provider_message: 'Max size: N tokens.'
+          )
+        end
+        client.define_singleton_method(:calls) { [] }
+        client
+      end
+
       def call_with(llm_client:, request:, headers: nil)
         headers ||= valid_headers
         Infrastructure::LlmClient.stub(:for, llm_client) do
@@ -475,6 +488,58 @@ module Tyla
 
         _(outcome).must_be :failure?
         _(outcome.failure.first).must_equal :rate_limited
+      end
+
+      # ── Provider input-too-large 413 (plan 2026-06-24 route D) ───────────────
+
+      it 'returns Failure[:input_too_large] with per_request scope + max_input_tokens on a 413' do
+        id      = seed_guard(attack_probability: 0.1)
+        outcome = call_with(request: request_for(id), llm_client: input_too_large_tutor(max_input_tokens: 8_000))
+
+        _(outcome).must_be :failure?
+        tag, _message, errors = outcome.failure
+        _(tag).must_equal :input_too_large
+        _(errors[:limit_scope]).must_equal 'per_request'
+        _(errors[:limit_dimension]).must_equal 'tokens'
+        _(errors[:max_input_tokens]).must_equal 8_000
+      end
+
+      it 'returns Failure[:input_too_large] with nil max_input_tokens when the provider omitted N' do
+        id      = seed_guard(attack_probability: 0.1)
+        outcome = call_with(request: request_for(id), llm_client: input_too_large_tutor(max_input_tokens: nil))
+
+        _(outcome).must_be :failure?
+        tag, _message, errors = outcome.failure
+        _(tag).must_equal :input_too_large
+        _(errors[:max_input_tokens]).must_be_nil
+      end
+
+      it 'mini-loop: a round-2 413 surfaces as the :input_too_large failure (larger body after solution injection)' do
+        id     = seed_guard(attack_probability: 0.1)
+        count  = 0
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          count += 1
+          raise Infrastructure::LlmError::InputTooLarge.new('input too large', max_input_tokens: 8_000) if count > 1
+
+          Infrastructure::LlmResponse.new(content: 'r1', usage: { input_tokens: 1, output_tokens: 1 },
+                                          tool_calls: [{ 'type' => 'load_reference', 'name' => 'reference_solution' }])
+        end
+
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome).must_be :failure?
+        _(outcome.failure.first).must_equal :input_too_large
+      end
+
+      it 'splits 413 from 429: a RateLimited stays :rate_limited, an InputTooLarge stays :input_too_large' do
+        id = seed_guard(attack_probability: 0.1)
+
+        rl = call_with(request: request_for(id), llm_client: rate_limited_tutor)
+        _(rl.failure.first).must_equal :rate_limited
+
+        itl = call_with(request: request_for(id), llm_client: input_too_large_tutor)
+        _(itl.failure.first).must_equal :input_too_large
       end
 
       # ── tripped_rate_limit_dimension unit (shared by hard 429 + C2 soft path) ──
