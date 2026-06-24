@@ -192,7 +192,14 @@ module Tyla
           include_solution:   include_solution,
           profile:            persona.profile
         )
-        return Failure[:context_overflow, 'prompt exceeds model context window'] if assembled.overflow?
+        # Decision 2 (plan 2026-06-24): tag the pre-flight overflow with the same
+        # per_request scope the provider-real 413 (input_too_large) carries, so both
+        # 413 sources hand the frontend a consistent limit_scope. No max_input_tokens
+        # here — pre-flight is our estimate, not the provider's per-model truth (§9).
+        if assembled.overflow?
+          return Failure[:context_overflow, 'prompt exceeds model context window',
+                         { limit_scope: 'per_request' }]
+        end
 
         Success(assembled)
       rescue Errno::ENOENT => e
@@ -218,6 +225,8 @@ module Tyla
         Failure[:upstream_timeout, 'LLM request timed out']
       rescue Infrastructure::LlmError::RateLimited => e
         rate_limited_failure(e)
+      rescue Infrastructure::LlmError::InputTooLarge => e
+        input_too_large_failure(e)
       rescue Infrastructure::LlmError::Upstream => e
         Failure[:upstream_error, e.message]
       end
@@ -230,6 +239,17 @@ module Tyla
                 { retry_after:     error.retry_after,
                   limit_scope:     'provider_account',
                   limit_dimension: tripped_rate_limit_dimension(error.rate_limit) || 'unknown' }]
+      end
+
+      # 413 → :input_too_large (HTTP 413). per-request scope, ALWAYS — never
+      # provider_account (that's 429) and never conversation. The student-facing
+      # wording is the frontend's job (localized from the stable tag + max_input_tokens),
+      # mirroring how `warnings` tokens are localized; we only ship the signal + N.
+      def input_too_large_failure(error)
+        Failure[:input_too_large, 'tutor input exceeds the provider per-request limit',
+                { limit_scope:      'per_request',
+                  limit_dimension:  'tokens',
+                  max_input_tokens: error.max_input_tokens }] # nil when provider omitted it
       end
 
       # ── Plain helpers (no Result wrapping) ─────────────────────────────────────

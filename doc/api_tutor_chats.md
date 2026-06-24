@@ -351,6 +351,7 @@ All error responses share the common envelope used by the rest of the API:
 | `400` | `bad_request` | Body field validation failed (missing field incl. `guard_log_id`, wrong type, history > 500 KB) |
 | `403` | `forbidden` | `X-LLM-Key` header is absent or empty |
 | `404` | `not_found` | An assignment artefact file is missing on disk |
+| `413` | `payload_too_large` | This turn's input is too large for the model's per-request token window. **Two sources, same status:** (1) **pre-flight estimate** (`context_overflow`) — the prompt assembler estimated the assembled input would overflow the channel's input budget and refused before sending; (2) **provider-real** (`input_too_large`, **NEW 2026-06-24, route D**) — the provider itself returned `413` (e.g. GitHub Models `tokens_limit_reached`) because the real tokenized body exceeded the per-model cap the estimate missed. Both carry `errors.limit_scope: "per_request"` and `errors.limit_dimension: "tokens"`; the provider-real source additionally carries `errors.max_input_tokens` (the per-model cap `N`, or `null` when the provider omitted it). **Remedy: start a fresh conversation** (empties history → smaller body). **Opposite of `429 rate_limited`** — do **not** back off and retry the same body (it will 413 again), and do **not** merge it with the 429 path (see [Which limit](#which-limit-scope--dimension)). |
 | `429` | `rate_limited` | **NEW (2026-06-18, route C).** The tutor LLM provider returned `429` — the account's rate-limit window is exhausted. `errors.retry_after` (and, when present, the `Retry-After` response header) carries the suggested back-off in seconds; `errors.limit_scope` is always `"provider_account"`; `errors.limit_dimension` is best-effort `"requests"` / `"tokens"` / `"unknown"` (see [Which limit](#which-limit-scope--dimension)). **Distinct from `502 upstream_error`** — this is a back-off signal, not a hard failure: wait and retry, do not hammer-retry (that hits the limit faster). |
 | `500` | `internal_error` | Database write failed |
 | `502` | `upstream_error` | The tutor LLM call returned a non-2xx **other than 429** |
@@ -361,6 +362,48 @@ All error responses share the common envelope used by the rest of the API:
 > not a server-issued credential check. `403 Forbidden` is the correct
 > mapping: the request is well-formed and the server understood it, but the
 > client did not supply the credential the operation requires.
+
+### Input too large — `status: "payload_too_large"` (`413 Payload Too Large`)
+
+**NEW (2026-06-24, route D).** This turn's input exceeded the model's **per-request** token
+window. There is no usable reply — the turn failed. Two sources produce this same `413`:
+
+- **pre-flight estimate (`context_overflow`)** — the prompt assembler's *estimate* of the
+  assembled input already overflowed the channel's input budget, so it refused before sending.
+- **provider-real (`input_too_large`)** — the request went out, but the provider's *real*
+  tokenizer (counting the whole body: system prompt + tool definitions + JSON structure)
+  exceeded the per-model cap, so the provider returned `413` (e.g. GitHub Models
+  `tokens_limit_reached`, message `Request body too large for <model> model. Max size: N tokens.`).
+  This is the safety net for the per-model caps the flat pre-flight budget can't predict
+  (`gpt-4.1` = 16K, `gpt-4o/4o-mini` = 8K, `o1-mini/gpt-5-mini/deepseek-r1/o3-mini` = 4K).
+
+```json
+{
+  "status":  "payload_too_large",
+  "message": "tutor input exceeds the provider per-request limit",
+  "errors": {
+    "limit_scope":      "per_request",
+    "limit_dimension":  "tokens",
+    "max_input_tokens": 16000
+  }
+}
+```
+
+| `errors` field | Type | Meaning |
+|---|---|---|
+| `limit_scope` | string | Always `"per_request"` for a 413 — this single turn's input is too big, **never** `"provider_account"` (that's 429) and **never** `"conversation"`. |
+| `limit_dimension` | string | Always `"tokens"` — it is a token-size cap. |
+| `max_input_tokens` | integer \| null | The provider's per-model cap `N`, parsed from `Max size: N tokens` (provider-real source only). `null` when the provider omitted a number, or for the pre-flight `context_overflow` source (an estimate gives no per-model truth). Frontends fall back to generic copy when `null`. |
+
+> **Remedy: start a fresh conversation.** Emptying the history shrinks the body below the
+> cap. **Do not auto-retry the same request** — the body did not change, so it will `413`
+> again. The provider's English message (which names an internal model id) is **not**
+> forwarded to the student; the backend ships only the structured `max_input_tokens`.
+
+> **⚠️ Opposite of `429 rate_limited`.** A 413 says "this input is too big → start a fresh
+> conversation"; a 429 says "your key is throttled → wait / back off (a fresh conversation
+> does *not* help)". **Never route 413 and 429 through the same "you hit a limit" path** —
+> the remedies are inverse (see [Which limit](#which-limit-scope--dimension)).
 
 ### Provider rate-limited — `status: "rate_limited"` (`429 Too Many Requests`)
 
@@ -402,7 +445,7 @@ never gives the wrong remedy:
 
 | Limit (`limit_scope`) | Signal | Surfaced as | What it means | Remedy |
 |---|---|---|---|---|
-| `per_request` | `session_limit_reached` | `warnings[]` (turn still `done`) | *This single turn's* assembled input has closed on the model's per-request context window | **Start a fresh conversation** — a new conversation empties the history, freeing the window |
+| `per_request` | `session_limit_reached` (soft) / `context_overflow` + `input_too_large` (hard 413) | `warnings[]` (soft, turn still `done`) / `413` body `errors` (hard) | *This single turn's* assembled input is near (soft) or past (hard) the model's per-request context window | **Start a fresh conversation** — a new conversation empties the history, freeing the window. *(Same remedy soft → hard; the hard 413 just means we already crossed the line.)* |
 | `provider_account` | `provider_rate_limited` (soft) / `rate_limited` (hard 429) | `warnings[]` (soft) / `429` body `errors` (hard) | *Your key's* rate window (per-minute / per-day requests or tokens) is near / past its quota | **Wait / back off** — a fresh conversation does **not** help; it reuses the same key against the same quota |
 | `conversation` | — (**never emitted**) | — | A running per-conversation token tally | n/a — the backend does **not** track this and the provider does not report it; route B was deliberately not built |
 

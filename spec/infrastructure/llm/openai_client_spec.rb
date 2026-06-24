@@ -166,4 +166,46 @@ describe Tyla::Infrastructure::OpenAiClient do
 
     _(resp.rate_limit).must_equal({})
   end
+
+  # ── Input-too-large pass-through (plan 2026-06-24 route D) ───────────────────
+
+  it 'raises LlmError::InputTooLarge on 413, parsing max_input_tokens and provider_message' do
+    stub_request(:post, 'https://api.openai.com/v1/chat/completions')
+      .to_return(
+        status: 413,
+        body: {
+          error: {
+            code: 'tokens_limit_reached',
+            message: 'Request body too large for gpt-4.1 model. Max size: 16000 tokens.'
+          }
+        }.to_json
+      )
+
+    err = _ { client.send_prompt(system_prompt: 's', user_message: 'u') }
+          .must_raise Tyla::Infrastructure::LlmError::InputTooLarge
+    _(err.max_input_tokens).must_equal 16_000
+    _(err.provider_message).must_match(/Max size: 16000 tokens/)
+  end
+
+  it 'raises LlmError::InputTooLarge with nil max_input_tokens when the 413 message lacks "Max size"' do
+    stub_request(:post, 'https://api.openai.com/v1/chat/completions')
+      .to_return(
+        status: 413,
+        body: { error: { code: 'tokens_limit_reached', message: 'request entity too large' } }.to_json
+      )
+
+    err = _ { client.send_prompt(system_prompt: 's', user_message: 'u') }
+          .must_raise Tyla::Infrastructure::LlmError::InputTooLarge
+    _(err.max_input_tokens).must_be_nil
+  end
+
+  it 'raises LlmError::InputTooLarge with nil max_input_tokens on a non-JSON 413 body (defensive)' do
+    stub_request(:post, 'https://api.openai.com/v1/chat/completions')
+      .to_return(status: 413, body: 'Request Entity Too Large')
+
+    err = _ { client.send_prompt(system_prompt: 's', user_message: 'u') }
+          .must_raise Tyla::Infrastructure::LlmError::InputTooLarge
+    _(err.max_input_tokens).must_be_nil
+    _(err.provider_message).must_equal 'Request Entity Too Large'
+  end
 end

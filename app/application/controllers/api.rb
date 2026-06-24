@@ -10,7 +10,8 @@ module Tyla
       unauthorized: :unauthorized,
       forbidden: :forbidden,
       not_found: :not_found,
-      context_overflow: :payload_too_large,
+      context_overflow: :payload_too_large,   # pre-flight estimate (prompt assembler)
+      input_too_large: :payload_too_large,    # (plan 2026-06-24 route D) — provider-real 413
       cannot_process: :cannot_process,
       upstream_error: :upstream_error,
       upstream_timeout: :upstream_timeout,
