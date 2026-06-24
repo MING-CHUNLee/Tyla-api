@@ -112,6 +112,8 @@ DEV 想（if possible）在訊號裡附上「撞到的是**哪一種** limit」�
 | `provider_account`（帳號 rate 窗口）| (C) | `provider_rate_limited`（軟, warnings）／`rate_limited`（硬, 429）| provider `*ratelimit*` header / 429 | ✅ 本案 |
 | `conversation`（整段對話累計）| (B) | —（**永不發**）| provider **無對話概念、不回報**；我們也未存（未做 B）| ❌ 標不出來 |
 
+> **更新（2026-06-24）：`per_request` 列的「硬」格由路線 (D) 補上。** 上表 (A) `session_limit_reached` 是 per_request 的**軟**警告；其**硬**對應 —— provider 真的回 **413**（`tokens_limit_reached`，input 超單次 token 上限）—— 由 (D) 拆成 `:input_too_large` → HTTP 413 處理（同軸、同 remedy「開新對話」，與 429 相反）。規格見 [`plans/2026-06-24-provider-413-input-too-large.md`](2026-06-24-provider-413-input-too-large.md)。
+
 > 學生面看到 `session_limit_reached` 就是「**這一次**的輸入太長（per-request）」；看到 `provider_rate_limited`/429 就是「你的**金鑰帳號**這個 rate 窗口快滿（provider account）」。**兩個 token 已把最大的兩種 scope 分開** —— 這就是「which limit」的第一層答案，不必額外做什麼。
 
 **(C) 內可再標的子維度（best-effort，純從 header 名推）：**

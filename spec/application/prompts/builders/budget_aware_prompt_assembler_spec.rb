@@ -5,6 +5,8 @@ require_relative '../../../spec_helper'
 %w[
   app/domain/values/tokenizer.rb
   app/domain/values/token_budget.rb
+  app/domain/values/tutor_tools.rb
+  app/domain/values/persona_profile.rb
   app/application/prompts/builders/tutor_system_prompt.rb
   app/application/prompts/builders/budget_aware_prompt_assembler.rb
 ].each { |f| require File.join(ROOT, f) }
@@ -472,6 +474,75 @@ describe Tyla::Prompts::BudgetAwarePromptAssembler do
       _(result.overflow?).must_equal false
       _(result.system_prompt).must_include '## Reference Solution'
       _(result.history_turns_dropped).must_equal 1
+    end
+  end
+
+  describe 'persona profile injection gating (MS3 plan §7.2)' do
+    def tier3_profile
+      Tyla::Values::PersonaProfile.new(
+        tools: [], inject_workspace: false, inject_reference: false
+      )
+    end
+
+    it 'inject_workspace=false (tier3) skips overview, file_context, and fixture student file' do
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:            '',
+        assignment:         'ASSIGNMENT_BODY',
+        solution:           '',
+        student_file:       { path: 'Hw2.Rmd', content: 'FIXTURE_STUDENT_FILE_MARKER' },
+        history:            [],
+        user_prompt:        '',
+        endpoint:           GITHUB_ENDPOINT,
+        file_context:       'LIVE_FILE_CONTEXT_MARKER',
+        workspace_overview: 'OVERVIEW_LISTING_MARKER',
+        profile:            tier3_profile
+      )
+
+      _(result.overflow?).must_equal false
+      _(result.system_prompt).must_include 'ASSIGNMENT_BODY'         # assignment still mandatory
+      _(result.system_prompt).wont_include '## Student Workspace'
+      _(result.system_prompt).wont_include 'OVERVIEW_LISTING_MARKER'
+      _(result.system_prompt).wont_include 'LIVE_FILE_CONTEXT_MARKER'
+      _(result.system_prompt).wont_include 'FIXTURE_STUDENT_FILE_MARKER'
+      # Nothing was budgeted out — it was intentionally never injected.
+      _(result.workspace_overview_dropped).must_equal false
+      _(result.student_file_dropped).must_equal false
+    end
+
+    it 'inject_reference=false (tier3) drops the course-materials manifest' do
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:      '',
+        assignment:   '',
+        solution:     '',
+        student_file: { path: 'x', content: '' },
+        history:      [],
+        user_prompt:  '',
+        endpoint:     GITHUB_ENDPOINT,
+        profile:      tier3_profile
+      )
+
+      _(result.system_prompt).wont_include '## Available Course Materials'
+      _(result.system_prompt).wont_include '## Tool Use Guide'
+    end
+
+    it 'frees the skipped workspace budget back to history for tier3' do
+      # A big overview would normally eat the budget; with inject_workspace=false it
+      # is never considered, so the whole input budget is available to history.
+      history = [{ role: 'user', content: 'keep me' }]
+      result = Tyla::Prompts::BudgetAwarePromptAssembler.call(
+        persona:            '',
+        assignment:         '',
+        solution:           '',
+        student_file:       { path: 'x', content: '' },
+        history:            history,
+        user_prompt:        '',
+        endpoint:           GITHUB_ENDPOINT,
+        workspace_overview: 'O' * 30_000,
+        profile:            tier3_profile
+      )
+
+      _(result.history.size).must_equal 1
+      _(result.workspace_overview_dropped).must_equal false
     end
   end
 

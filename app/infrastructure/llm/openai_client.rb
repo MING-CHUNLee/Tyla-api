@@ -90,9 +90,35 @@ module Tyla
         )
       end
 
+      # 413 → distinct InputTooLarge (per-request token cap). Parse the provider's
+      # "Max size: N tokens" so the frontend can localize "input too long (max N) —
+      # start a fresh conversation". No-op on any non-413 response.
+      def raise_if_input_too_large(response)
+        return unless response.is_a?(Net::HTTPRequestEntityTooLarge) # 413
+
+        provider_message = extract_provider_error_message(response.body)
+        raise LlmError::InputTooLarge.new(
+          'openai input too large (413)',
+          max_input_tokens: parse_max_input_tokens(provider_message),
+          provider_message: provider_message
+        )
+      end
+
+      def extract_provider_error_message(body)
+        JSON.parse(body).dig('error', 'message') || body.to_s
+      rescue JSON::ParserError
+        body.to_s
+      end
+
+      def parse_max_input_tokens(message)
+        m = message.to_s.match(/max size:\s*(\d+)\s*tokens/i)
+        m && m[1].to_i
+      end
+
       def parse(response)
         rate_limit = RateLimitHeaders.extract(response)
         raise_if_rate_limited(response, rate_limit)
+        raise_if_input_too_large(response) # 413 → InputTooLarge, before generic Upstream
         raise LlmError::Upstream, "openai returned #{response.code}" unless response.is_a?(Net::HTTPSuccess)
 
         data    = JSON.parse(response.body)

@@ -28,8 +28,7 @@ require File.join(ROOT, 'app/infrastructure/database/repositories/prompt_logs.rb
   app/infrastructure/filesystem/tutor_chat/assignment_loader.rb
   app/infrastructure/filesystem/tutor_chat/solution_loader.rb
   app/infrastructure/filesystem/tutor_chat/student_file_loader.rb
-  app/infrastructure/filesystem/tutor_chat/tutor_persona_loader.rb
-  app/infrastructure/filesystem/tutor_chat/refusal_loader.rb
+  app/infrastructure/filesystem/tutor_chat/tutor_persona_resolver.rb
   app/presentation/representers/tutor_chat_representer.rb
   app/application/services/tutor_chat/run_tutor_chat.rb
 ].each { |f| require File.join(ROOT, f) }
@@ -103,6 +102,19 @@ module Tyla
         client
       end
 
+      # Tutor client whose send_prompt raises a provider 413 (LlmError::InputTooLarge),
+      # carrying the parsed per-model cap (nil when the provider omitted it).
+      def input_too_large_tutor(max_input_tokens: 8_000)
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          raise Infrastructure::LlmError::InputTooLarge.new(
+            'input too large', max_input_tokens: max_input_tokens, provider_message: 'Max size: N tokens.'
+          )
+        end
+        client.define_singleton_method(:calls) { [] }
+        client
+      end
+
       def call_with(llm_client:, request:, headers: nil)
         headers ||= valid_headers
         Infrastructure::LlmClient.stub(:for, llm_client) do
@@ -110,9 +122,21 @@ module Tyla
         end
       end
 
+      # Pin the process-global persona seam (MS3 §7.1.1) to tier1 (solver) so these
+      # generic tests resolve a known persona/refusal; restore the prior value after.
       before do
         Tyla::Database::PromptLogOrm.dataset = RTC_DB[:prompt_logs]
         RTC_DB[:prompt_logs].delete
+        @prev_persona = ENV.fetch('TUTOR_PERSONA', nil)
+        ENV['TUTOR_PERSONA'] = 'tier1'
+      end
+
+      after do
+        if @prev_persona.nil?
+          ENV.delete('TUTOR_PERSONA')
+        else
+          ENV['TUTOR_PERSONA'] = @prev_persona
+        end
       end
 
       it 'returns Failure[:forbidden] when X-LLM-Key is missing' do
@@ -175,7 +199,7 @@ module Tyla
         kind, dto = outcome.value!
         _(kind).must_equal :forbidden
         _(dto.status).must_equal 'forbidden'
-        _(dto.content).must_include "Let's work through this together"
+        _(dto.content).must_include 'build and verify working code'  # tier1 (solver) refusal
         _(dto.usage).must_be_nil
         _(dto.actions).must_be_nil
         _(client.calls.size).must_equal 0  # tutor never called
@@ -466,6 +490,58 @@ module Tyla
         _(outcome.failure.first).must_equal :rate_limited
       end
 
+      # ── Provider input-too-large 413 (plan 2026-06-24 route D) ───────────────
+
+      it 'returns Failure[:input_too_large] with per_request scope + max_input_tokens on a 413' do
+        id      = seed_guard(attack_probability: 0.1)
+        outcome = call_with(request: request_for(id), llm_client: input_too_large_tutor(max_input_tokens: 8_000))
+
+        _(outcome).must_be :failure?
+        tag, _message, errors = outcome.failure
+        _(tag).must_equal :input_too_large
+        _(errors[:limit_scope]).must_equal 'per_request'
+        _(errors[:limit_dimension]).must_equal 'tokens'
+        _(errors[:max_input_tokens]).must_equal 8_000
+      end
+
+      it 'returns Failure[:input_too_large] with nil max_input_tokens when the provider omitted N' do
+        id      = seed_guard(attack_probability: 0.1)
+        outcome = call_with(request: request_for(id), llm_client: input_too_large_tutor(max_input_tokens: nil))
+
+        _(outcome).must_be :failure?
+        tag, _message, errors = outcome.failure
+        _(tag).must_equal :input_too_large
+        _(errors[:max_input_tokens]).must_be_nil
+      end
+
+      it 'mini-loop: a round-2 413 surfaces as the :input_too_large failure (larger body after solution injection)' do
+        id     = seed_guard(attack_probability: 0.1)
+        count  = 0
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**_kwargs|
+          count += 1
+          raise Infrastructure::LlmError::InputTooLarge.new('input too large', max_input_tokens: 8_000) if count > 1
+
+          Infrastructure::LlmResponse.new(content: 'r1', usage: { input_tokens: 1, output_tokens: 1 },
+                                          tool_calls: [{ 'type' => 'load_reference', 'name' => 'reference_solution' }])
+        end
+
+        outcome = call_with(request: request_for(id), llm_client: client)
+
+        _(outcome).must_be :failure?
+        _(outcome.failure.first).must_equal :input_too_large
+      end
+
+      it 'splits 413 from 429: a RateLimited stays :rate_limited, an InputTooLarge stays :input_too_large' do
+        id = seed_guard(attack_probability: 0.1)
+
+        rl = call_with(request: request_for(id), llm_client: rate_limited_tutor)
+        _(rl.failure.first).must_equal :rate_limited
+
+        itl = call_with(request: request_for(id), llm_client: input_too_large_tutor)
+        _(itl.failure.first).must_equal :input_too_large
+      end
+
       # ── tripped_rate_limit_dimension unit (shared by hard 429 + C2 soft path) ──
 
       def dimension_for(bag)
@@ -510,7 +586,7 @@ module Tyla
 
         _(captured).wont_be_nil
         prompt = captured[:system_prompt]
-        _(prompt).must_include 'Tutor-Guide Mode'              # persona
+        _(prompt).must_include 'Tutor-Solver Mode'            # persona (tier1)
         _(prompt).must_include '## Assignment'                 # assignment header
         _(prompt).must_include '## Available Course Materials' # manifest (eager)
         _(prompt).wont_include '## Reference Solution'         # solution is lazy now
@@ -899,6 +975,100 @@ module Tyla
         call_with(request: request_for(id, session_turns: turns), llm_client: client)
 
         _(captured[:system_prompt]).must_include 'source of truth'
+      end
+
+      # ── Per-persona tool gate + dual-channel whitelist (MS3 §7.3, testing plan §2.1) ──
+      #
+      # The `before` hook pins TUTOR_PERSONA=tier1 and the `after` hook restores the
+      # pre-test value, so each example may re-pin the env seam to its own tier; the
+      # restore still runs. resolve_persona reads this seam once per call.
+
+      # Capture the first send_prompt kwargs without a scripted reply.
+      def captured_send_prompt(content: 'ok')
+        captured = nil
+        client = Object.new
+        client.define_singleton_method(:send_prompt) do |**kwargs|
+          captured ||= kwargs
+          Infrastructure::LlmResponse.new(content: content, usage: { input_tokens: 10, output_tokens: 5 })
+        end
+        client.define_singleton_method(:captured) { captured }
+        client
+      end
+
+      it 'tier1 sends the full four-tool whitelist on round 1' do
+        ENV['TUTOR_PERSONA'] = 'tier1'
+        id     = seed_guard(attack_probability: 0.1)
+        client = tutor_llm(content: 'ok')
+        call_with(request: request_for(id), llm_client: client)
+
+        _(client.calls.first[:tools].map { |t| t[:name] })
+          .must_equal %w[load_file edit_file execute_script load_reference]
+      end
+
+      it 'tier2 sends only the read-only whitelist (load_file, load_reference) — no edit/execute' do
+        ENV['TUTOR_PERSONA'] = 'tier2'
+        id     = seed_guard(attack_probability: 0.1)
+        client = tutor_llm(content: 'ok')
+        call_with(request: request_for(id), llm_client: client)
+
+        _(client.calls.first[:tools].map { |t| t[:name] }).must_equal %w[load_file load_reference]
+      end
+
+      it 'tier3 sends an empty toolset (the transport then drops the tools key entirely)' do
+        ENV['TUTOR_PERSONA'] = 'tier3'
+        id     = seed_guard(attack_probability: 0.1)
+        client = tutor_llm(content: 'ok')
+        call_with(request: request_for(id), llm_client: client)
+
+        _(client.calls.first[:tools]).must_equal []
+      end
+
+      it 'tier3 system prompt omits the tool-use guide, course-materials manifest, and workspace block' do
+        ENV['TUTOR_PERSONA'] = 'tier3'
+        id     = seed_guard(attack_probability: 0.1)
+        client = captured_send_prompt
+        call_with(request: request_for(id), llm_client: client)
+
+        prompt = client.captured[:system_prompt]
+        _(prompt).must_include 'name: tutor-socratic'          # socratic persona resolved
+        _(prompt).wont_include '## Tool Use Guide'             # tools == [] → no guide
+        _(prompt).wont_include '## Available Course Materials'  # inject_reference=false → no manifest
+        _(prompt).wont_include '## Student Workspace'           # inject_workspace=false → no workspace
+      end
+
+      it 'tier3: a prose <actions> edit_file is cleared by the whitelist → actions == [] (§7.3 symptom 2)' do
+        ENV['TUTOR_PERSONA'] = 'tier3'
+        id    = seed_guard(attack_probability: 0.1)
+        reply = "Think it through.\n<actions>[{\"type\":\"edit_file\",\"path\":\"hw2.R\"," \
+                '"patches":[{"start_line":1,"search":"x","replace":"y"}]}]</actions>'
+        _, dto = call_with(request: request_for(id), llm_client: tutor_llm(content: reply)).value!
+
+        _(dto.content).must_equal 'Think it through.'
+        _(dto.actions).must_equal []   # tier3 holds no tools — the phantom action is forced empty
+      end
+
+      it 'tier2: a prose <actions> with load_file + edit_file keeps only load_file (whitelist)' do
+        ENV['TUTOR_PERSONA'] = 'tier2'
+        id    = seed_guard(attack_probability: 0.1)
+        reply = "Let me read it.\n<actions>[{\"type\":\"load_file\",\"path\":\"hw2.R\"}," \
+                '{"type":"edit_file","path":"hw2.R","patches":[{"start_line":1,"search":"x","replace":"y"}]}]' \
+                '</actions>'
+        _, dto = call_with(request: request_for(id), llm_client: tutor_llm(content: reply)).value!
+
+        _(dto.actions).must_equal [{ 'type' => 'load_file', 'path' => 'hw2.R' }]  # edit_file dropped
+      end
+
+      it 'tier3: a prose load_reference does NOT trigger round 2 (profile-flag short-circuit, §7.3 symptom 1)' do
+        ENV['TUTOR_PERSONA'] = 'tier3'
+        id    = seed_guard(attack_probability: 0.1)
+        reply = "What does the spec define?\n" \
+                '<actions>[{"type":"load_reference","name":"reference_solution"}]</actions>'
+        client = tutor_llm(content: reply)
+        _, dto = call_with(request: request_for(id), llm_client: client).value!
+
+        _(client.calls.size).must_equal 1                       # never re-enters the loop
+        _(dto.actions).must_equal []                            # load_reference also whitelisted out
+        _(Array(dto.warnings)).wont_include 'reference_loaded'  # no solution was injected
       end
     end
   end

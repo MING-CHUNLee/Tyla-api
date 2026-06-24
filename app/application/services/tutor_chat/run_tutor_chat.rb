@@ -66,102 +66,42 @@ module Tyla
       FALLBACK_PROSE = "I couldn't act on that automatically this time. Could you re-share " \
                        'the file you want me to look at, or rephrase what you would like help with?'
 
-      TOOLS = [
-        {
-          name: 'edit_file',
-          description: 'Apply a search-replace patch to a file the student has ALREADY loaded — one shown ' \
-                       'in the "Student Workspace (live)" section with a "N| " line-number prefix on every line. ' \
-                       'Set `start_line` to the line number shown on the first line you are replacing, and put ' \
-                       'plain code (no "N| " prefix) in `search` and `replace`. ' \
-                       'Do NOT call this for a file that appears only in the "Student Workspace (overview)" ' \
-                       'section, is not shown at all, or was merely pasted into the chat: call load_file first ' \
-                       'and wait for its numbered contents. Never invent a "N| " prefix or guess a line number.',
-          input_schema: {
-            type: 'object',
-            properties: {
-              path:    { type: 'string', description: 'Relative path to the file' },
-              patches: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    start_line: { type: 'integer',
-                                  description: '1-based file line number of the first line of `search`, read ' \
-                                               'from the "N| " prefix shown in the workspace context.' },
-                    search:     { type: 'string',
-                                  description: 'The exact lines to find, as plain code WITHOUT the "N| " ' \
-                                               'prefixes — copy the content only; put the line number in ' \
-                                               '`start_line`.' },
-                    replace:    { type: 'string', description: 'Replacement code WITHOUT line-number prefixes.' }
-                  },
-                  required: %w[start_line search replace]
-                }
-              }
-            },
-            required: %w[path patches]
-          }
-        },
-        {
-          name: 'execute_script',
-          description: 'Provide a read-only R demo script. Use when showing runnable example code ' \
-                       'that does not exist in any workspace file. No file writes or package installs.',
-          input_schema: {
-            type: 'object',
-            properties: {
-              code: { type: 'string', description: 'R code to execute' }
-            },
-            required: %w[code]
-          }
-        },
-        {
-          name: 'load_file',
-          description: 'Request the line-numbered contents of a workspace file that is not yet loaded ' \
-                       '(listed only in the "Student Workspace (overview)" section, or not shown at all). Call ' \
-                       'this BEFORE editing such a file; its contents arrive next turn in "Student Workspace (live)".',
-          input_schema: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', description: 'Relative path to the file to load' }
-            },
-            required: %w[path]
-          }
-        },
-        {
-          name: LOAD_REFERENCE,
-          description: 'Load an instructor course material into your context. ' \
-                       'Resolved by the server; the material itself is never shown to the student verbatim.',
-          input_schema: {
-            type: 'object',
-            properties: {
-              # enum doubles as a schema-level whitelist: no path hallucination.
-              name: { type: 'string', enum: ['reference_solution'] }
-            },
-            required: %w[name]
-          }
-        }
-      ].freeze
-
-      # Round 2 physically lacks load_reference — termination is structural,
-      # not prompt-enforced.
-      ROUND2_TOOLS = TOOLS.reject { |t| t[:name] == LOAD_REFERENCE }.freeze
+      # Tool definitions live in Values::TutorTools (single source of truth, MS3
+      # plan §7.1). Phase 3: the mini-loop no longer sends a hardcoded toolset — it
+      # draws the per-persona whitelist from the resolved profile (`profile.tools`),
+      # and derives round 2's set dynamically as `profile.tools − load_reference`
+      # (the old global TOOLS / ROUND2_TOOLS constants are gone, §7.3).
 
       def call(raw_params, headers)
         credentials = yield extract_credentials(headers)
         params      = yield validate(raw_params)
+        persona     = resolve_persona
         guard_log   = yield load_guard_log(params[:guard_log_id])
         log         = yield persist_turn(params, guard_log)
         verdict     = derive_verdict(guard_log, params)
 
         # guard_log missing, prompt mismatch, or derived verdict :forbidden → refuse, no tutor call
-        return forbidden_outcome(log, params[:project_id]) unless tutor_allowed?(verdict)
+        return forbidden_outcome(log, persona) unless tutor_allowed?(verdict)
 
-        reply, assembled, reference_loaded, approaching_limit = yield tutor_mini_loop(credentials, params)
+        reply, assembled, reference_loaded, approaching_limit = yield tutor_mini_loop(credentials, params, persona)
 
-        Success(ok_outcome(log, reply, verdict, assembled, params,
+        Success(ok_outcome(log, reply, verdict, assembled, params, persona,
                            reference_loaded: reference_loaded, approaching_limit: approaching_limit))
       end
 
       private
+
+      # Single ENV seam (MS3 §7.1.1/§7.4): one running server serves one persona.
+      # Missing → fail-closed to the most restricted tier3 (server still boots but
+      # hands out no tools); NEVER fail-open to tier1. An invalid value raises inside
+      # the resolver — a deploy typo crashes loudly rather than granting full tools.
+      def persona_key_for
+        ENV.fetch('TUTOR_PERSONA', 'tier3')
+      end
+
+      def resolve_persona
+        Infrastructure::Filesystem::TutorPersonaResolver.call(persona_key_for)
+      end
 
       # ── Steps (each returns a Result; the chain short-circuits on Failure) ──────
 
@@ -213,21 +153,32 @@ module Tyla
       # the guard verdict was derived before it, so round 2 needs no re-check
       # (same prompt, no HTTP boundary crossed). Returns
       # [terminal reply (usage = Σ rounds), terminal assembly, reference_loaded].
-      def tutor_mini_loop(credentials, params)
-        assembled = yield assemble_prompt(params, credentials[:endpoint], include_solution: false)
-        round1    = yield request_tutor_reply(credentials, assembled, params, TOOLS)
-        return finish_loop([round1], assembled, reference_loaded: false) unless wants_reference?(round1)
+      def tutor_mini_loop(credentials, params, persona)
+        profile   = persona.profile
+        assembled = yield assemble_prompt(params, persona, credentials[:endpoint], include_solution: false)
+        round1    = yield request_tutor_reply(credentials, assembled, params, profile.tools)
+
+        # Round-2 gate (§7.3 symptom 1): short-circuit on the profile flag BEFORE
+        # wants_reference?. A persona without load_reference (tier3) can never inject
+        # the solution, even if its prose hallucinates an <actions> load_reference —
+        # `&&` keeps wants_reference? from running, so the prose channel is never read.
+        unless profile.tool_names.include?(LOAD_REFERENCE) && wants_reference?(round1)
+          return finish_loop([round1], assembled, reference_loaded: false)
+        end
 
         # Round 1's prose (if any) is discarded by design (plan §4 D4): a reply
-        # that asked for the reference is a draft, not an answer.
-        assembled = yield assemble_prompt(params, credentials[:endpoint], include_solution: true)
-        round2    = yield request_tutor_reply(credentials, assembled, params, ROUND2_TOOLS)
+        # that asked for the reference is a draft, not an answer. Round 2 physically
+        # lacks load_reference (derived from the profile, not a global constant) —
+        # termination is structural, not prompt-enforced.
+        round2_tools = profile.tools.reject { |t| t[:name] == LOAD_REFERENCE }
+        assembled    = yield assemble_prompt(params, persona, credentials[:endpoint], include_solution: true)
+        round2       = yield request_tutor_reply(credentials, assembled, params, round2_tools)
         finish_loop([round1, round2], assembled, reference_loaded: true)
       end
 
-      def assemble_prompt(params, endpoint, include_solution:)
+      def assemble_prompt(params, persona, endpoint, include_solution:)
         assembled = Prompts::BudgetAwarePromptAssembler.call(
-          persona:            Infrastructure::Filesystem::TutorPersonaLoader.load(params[:project_id]),
+          persona:            persona.persona_text,
           assignment:         Infrastructure::Filesystem::AssignmentLoader.load(params[:project_id]),
           solution:           Infrastructure::Filesystem::SolutionLoader.load(params[:project_id]),
           student_file:       { path:    Infrastructure::Filesystem::StudentFileLoader::FILENAME,
@@ -238,9 +189,17 @@ module Tyla
           session_turns:      params[:session_turns],
           user_prompt:        params[:prompt],
           endpoint:           endpoint,
-          include_solution:   include_solution
+          include_solution:   include_solution,
+          profile:            persona.profile
         )
-        return Failure[:context_overflow, 'prompt exceeds model context window'] if assembled.overflow?
+        # Decision 2 (plan 2026-06-24): tag the pre-flight overflow with the same
+        # per_request scope the provider-real 413 (input_too_large) carries, so both
+        # 413 sources hand the frontend a consistent limit_scope. No max_input_tokens
+        # here — pre-flight is our estimate, not the provider's per-model truth (§9).
+        if assembled.overflow?
+          return Failure[:context_overflow, 'prompt exceeds model context window',
+                         { limit_scope: 'per_request' }]
+        end
 
         Success(assembled)
       rescue Errno::ENOENT => e
@@ -266,6 +225,8 @@ module Tyla
         Failure[:upstream_timeout, 'LLM request timed out']
       rescue Infrastructure::LlmError::RateLimited => e
         rate_limited_failure(e)
+      rescue Infrastructure::LlmError::InputTooLarge => e
+        input_too_large_failure(e)
       rescue Infrastructure::LlmError::Upstream => e
         Failure[:upstream_error, e.message]
       end
@@ -278,6 +239,17 @@ module Tyla
                 { retry_after:     error.retry_after,
                   limit_scope:     'provider_account',
                   limit_dimension: tripped_rate_limit_dimension(error.rate_limit) || 'unknown' }]
+      end
+
+      # 413 → :input_too_large (HTTP 413). per-request scope, ALWAYS — never
+      # provider_account (that's 429) and never conversation. The student-facing
+      # wording is the frontend's job (localized from the stable tag + max_input_tokens),
+      # mirroring how `warnings` tokens are localized; we only ship the signal + N.
+      def input_too_large_failure(error)
+        Failure[:input_too_large, 'tutor input exceeds the provider per-request limit',
+                { limit_scope:      'per_request',
+                  limit_dimension:  'tokens',
+                  max_input_tokens: error.max_input_tokens }] # nil when provider omitted it
       end
 
       # ── Plain helpers (no Result wrapping) ─────────────────────────────────────
@@ -406,14 +378,19 @@ module Tyla
       #      OR of both redirected? flags drives `edit_file_redirected`; the
       #      redundant-load gate's dropped? flag is a SEPARATE 4th value.
       # Returns [prose, gated_actions, edit_file_redirected?, redundant_load_dropped?].
-      def extract_reply(llm_reply, params)
+      def extract_reply(llm_reply, params, profile)
         prose, actions = if llm_reply.tool_calls.any?
                            [llm_reply.content, llm_reply.tool_calls]
                          else
                            Values::TutorReplyParser.call(llm_reply.content)
                          end
+        # §7.3 symptom 2: the prose `<actions>` fallback is free text and can name a
+        # tool the persona does not hold. Gate BOTH channels by the profile whitelist
+        # so the whitelist is authoritative everywhere — tier3 (empty set) → actions
+        # forced to []; tier2 → any edit_file/execute_script dropped. The native
+        # branch only ever carries profile tools, so this is a no-op there.
+        actions = actions.select { |a| profile.tool_names.include?(action_type(a)) }
         actions = Values::EditPatchNormalizer.call(actions.reject { |a| action_type(a) == LOAD_REFERENCE })
-        warn "[tutor_chat.extract_reply] pre_gate_actions=#{actions.map { |a| action_type(a) }.inspect}"
         gated, redirected, load_dropped = apply_gates(actions, params)
         [prose, gated, redirected, load_dropped]
       end
@@ -437,26 +414,26 @@ module Tyla
       # ── Outcome builders (return the [kind, dto] tuple the controller unwraps) ──
 
       # Forbidden is a *successful* business outcome, not an error — the controller
-      # renders the refusal DTO at HTTP 200. The refusal artefact read can still
-      # raise, so this returns a Result rather than a bare tuple.
-      def forbidden_outcome(log, project_id)
+      # renders the refusal DTO at HTTP 200. The refusal comes from the SAME
+      # PersonaResolution that feeds assemble_prompt (§7.1.1), so a socratic persona
+      # can never emit a solver refusal; it is already in memory (read up-front in
+      # resolve_persona), so no further file read can raise here.
+      def forbidden_outcome(log, persona)
         dto = Response::TutorChat.new(
           log_id:  log.id,
           status:  'forbidden',
-          content: Infrastructure::Filesystem::RefusalLoader.load(project_id),
+          content: persona.refusal,
           actions: nil,        # omitted by the representer — never present on forbidden
           usage:   nil
         )
         Success([:forbidden, dto])
-      rescue Errno::ENOENT => e
-        Failure[:not_found, "missing artefact: #{e.message}"]
       end
 
       # §2.7: surface the assembler's trim flags instead of dropping silently —
       # the CLI renders these as status warnings so the student knows the tutor
       # did not see their file / older turns this round.
-      def ok_outcome(log, reply, verdict, assembled, params, reference_loaded:, approaching_limit:)
-        prose, actions, edit_file_redirected, redundant_load_dropped = extract_reply(reply, params)
+      def ok_outcome(log, reply, verdict, assembled, params, persona, reference_loaded:, approaching_limit:)
+        prose, actions, edit_file_redirected, redundant_load_dropped = extract_reply(reply, params, persona.profile)
         # Decision E: never ship an empty content + empty actions turn (§6 D1). When
         # the gates cleared every action and the model gave no prose, inject a nudge.
         prose = FALLBACK_PROSE if blank_text?(prose) && actions.empty?
