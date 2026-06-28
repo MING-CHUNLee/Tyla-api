@@ -101,6 +101,7 @@ module Tyla
         - In edit_file, set `start_line` to the number shown on the first line you are replacing.
         - Put plain code (NO "N| " prefixes) in both `search` and `replace`.
         - When quoting code in your explanation to the student, omit the prefixes.
+        - Files shown above are loaded for this request. Do NOT call `load_file` for any file already in this section, even if conversation history mentioned doing so.
       GUIDE
 
       # `profile` (MS3 plan §7.1.2/§7.2) gates three things: which tool-guide

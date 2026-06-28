@@ -25,8 +25,8 @@ module Tyla
         seen_paths = FileContextHeader.paths(val(turn, 'context_headers')).to_a
         content    = strip_pasted_code(prompt)
         if seen_paths.any?
-          content += "\n\n[Previously inspected last turn (contents not included now; " \
-                     "call load_file to see them again): #{seen_paths.join(', ')}]"
+          content += "\n\n[Previously inspected last turn (contents not re-included here; " \
+                     "call load_file only if not already in the current \"Student Workspace (live)\" section): #{seen_paths.join(', ')}]"
         end
         { role: 'user', content: content }
       end

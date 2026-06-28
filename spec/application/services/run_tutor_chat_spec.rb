@@ -122,13 +122,13 @@ module Tyla
         end
       end
 
-      # Pin the process-global persona seam (MS3 §7.1.1) to tier1 (solver) so these
+      # Pin the process-global persona seam (MS3 §7.1.1) to tutor-solver so these
       # generic tests resolve a known persona/refusal; restore the prior value after.
       before do
         Tyla::Database::PromptLogOrm.dataset = RTC_DB[:prompt_logs]
         RTC_DB[:prompt_logs].delete
         @prev_persona = ENV.fetch('TUTOR_PERSONA', nil)
-        ENV['TUTOR_PERSONA'] = 'tier1'
+        ENV['TUTOR_PERSONA'] = 'tutor-solver'
       end
 
       after do
@@ -199,7 +199,7 @@ module Tyla
         kind, dto = outcome.value!
         _(kind).must_equal :forbidden
         _(dto.status).must_equal 'forbidden'
-        _(dto.content).must_include 'build and verify working code'  # tier1 (solver) refusal
+        _(dto.content).must_include 'build and verify working code'  # tutor-solver refusal
         _(dto.usage).must_be_nil
         _(dto.actions).must_be_nil
         _(client.calls.size).must_equal 0  # tutor never called
@@ -586,7 +586,7 @@ module Tyla
 
         _(captured).wont_be_nil
         prompt = captured[:system_prompt]
-        _(prompt).must_include 'Tutor-Solver Mode'            # persona (tier1)
+        _(prompt).must_include 'Tutor-Solver Mode'            # persona (tutor-solver)
         _(prompt).must_include '## Assignment'                 # assignment header
         _(prompt).must_include '## Available Course Materials' # manifest (eager)
         _(prompt).wont_include '## Reference Solution'         # solution is lazy now
@@ -979,8 +979,8 @@ module Tyla
 
       # ── Per-persona tool gate + dual-channel whitelist (MS3 §7.3, testing plan §2.1) ──
       #
-      # The `before` hook pins TUTOR_PERSONA=tier1 and the `after` hook restores the
-      # pre-test value, so each example may re-pin the env seam to its own tier; the
+      # The `before` hook pins TUTOR_PERSONA=tutor-solver and the `after` hook restores
+      # the pre-test value, so each example may re-pin the env seam to its own persona; the
       # restore still runs. resolve_persona reads this seam once per call.
 
       # Capture the first send_prompt kwargs without a scripted reply.
@@ -995,8 +995,8 @@ module Tyla
         client
       end
 
-      it 'tier1 sends the full four-tool whitelist on round 1' do
-        ENV['TUTOR_PERSONA'] = 'tier1'
+      it 'tutor-solver sends the full four-tool whitelist on round 1' do
+        ENV['TUTOR_PERSONA'] = 'tutor-solver'
         id     = seed_guard(attack_probability: 0.1)
         client = tutor_llm(content: 'ok')
         call_with(request: request_for(id), llm_client: client)
@@ -1005,8 +1005,8 @@ module Tyla
           .must_equal %w[load_file edit_file execute_script load_reference]
       end
 
-      it 'tier2 sends only the read-only whitelist (load_file, load_reference) — no edit/execute' do
-        ENV['TUTOR_PERSONA'] = 'tier2'
+      it 'tutor-feynman sends only the read-only whitelist (load_file, load_reference) — no edit/execute' do
+        ENV['TUTOR_PERSONA'] = 'tutor-feynman'
         id     = seed_guard(attack_probability: 0.1)
         client = tutor_llm(content: 'ok')
         call_with(request: request_for(id), llm_client: client)
@@ -1014,8 +1014,8 @@ module Tyla
         _(client.calls.first[:tools].map { |t| t[:name] }).must_equal %w[load_file load_reference]
       end
 
-      it 'tier3 sends an empty toolset (the transport then drops the tools key entirely)' do
-        ENV['TUTOR_PERSONA'] = 'tier3'
+      it 'tutor-socratic sends an empty toolset (the transport then drops the tools key entirely)' do
+        ENV['TUTOR_PERSONA'] = 'tutor-socratic'
         id     = seed_guard(attack_probability: 0.1)
         client = tutor_llm(content: 'ok')
         call_with(request: request_for(id), llm_client: client)
@@ -1023,8 +1023,8 @@ module Tyla
         _(client.calls.first[:tools]).must_equal []
       end
 
-      it 'tier3 system prompt omits the tool-use guide, course-materials manifest, and workspace block' do
-        ENV['TUTOR_PERSONA'] = 'tier3'
+      it 'tutor-socratic system prompt omits the tool-use guide, course-materials manifest, and workspace block' do
+        ENV['TUTOR_PERSONA'] = 'tutor-socratic'
         id     = seed_guard(attack_probability: 0.1)
         client = captured_send_prompt
         call_with(request: request_for(id), llm_client: client)
@@ -1036,8 +1036,8 @@ module Tyla
         _(prompt).wont_include '## Student Workspace'           # inject_workspace=false → no workspace
       end
 
-      it 'tier3: a prose <actions> edit_file is cleared by the whitelist → actions == [] (§7.3 symptom 2)' do
-        ENV['TUTOR_PERSONA'] = 'tier3'
+      it 'tutor-socratic: a prose <actions> edit_file is cleared by the whitelist → actions == [] (§7.3 symptom 2)' do
+        ENV['TUTOR_PERSONA'] = 'tutor-socratic'
         id    = seed_guard(attack_probability: 0.1)
         reply = "Think it through.\n<actions>[{\"type\":\"edit_file\",\"path\":\"hw2.R\"," \
                 '"patches":[{"start_line":1,"search":"x","replace":"y"}]}]</actions>'
@@ -1047,8 +1047,8 @@ module Tyla
         _(dto.actions).must_equal []   # tier3 holds no tools — the phantom action is forced empty
       end
 
-      it 'tier2: a prose <actions> with load_file + edit_file keeps only load_file (whitelist)' do
-        ENV['TUTOR_PERSONA'] = 'tier2'
+      it 'tutor-feynman: a prose <actions> with load_file + edit_file keeps only load_file (whitelist)' do
+        ENV['TUTOR_PERSONA'] = 'tutor-feynman'
         id    = seed_guard(attack_probability: 0.1)
         reply = "Let me read it.\n<actions>[{\"type\":\"load_file\",\"path\":\"hw2.R\"}," \
                 '{"type":"edit_file","path":"hw2.R","patches":[{"start_line":1,"search":"x","replace":"y"}]}]' \
@@ -1058,8 +1058,8 @@ module Tyla
         _(dto.actions).must_equal [{ 'type' => 'load_file', 'path' => 'hw2.R' }]  # edit_file dropped
       end
 
-      it 'tier3: a prose load_reference does NOT trigger round 2 (profile-flag short-circuit, §7.3 symptom 1)' do
-        ENV['TUTOR_PERSONA'] = 'tier3'
+      it 'tutor-socratic: a prose load_reference does NOT trigger round 2 (profile-flag short-circuit, §7.3)' do
+        ENV['TUTOR_PERSONA'] = 'tutor-socratic'
         id    = seed_guard(attack_probability: 0.1)
         reply = "What does the spec define?\n" \
                 '<actions>[{"type":"load_reference","name":"reference_solution"}]</actions>'

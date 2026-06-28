@@ -92,11 +92,13 @@ module Tyla
       private
 
       # Single ENV seam (MS3 §7.1.1/§7.4): one running server serves one persona.
-      # Missing → fail-closed to the most restricted tier3 (server still boots but
-      # hands out no tools); NEVER fail-open to tier1. An invalid value raises inside
-      # the resolver — a deploy typo crashes loudly rather than granting full tools.
+      # The value is the persona's TUTOR.md directory name (e.g. 'tutor-feynman').
+      # Missing → fail-closed to the most restricted persona, tutor-socratic (server
+      # still boots but hands out no tools); NEVER fail-open to a fuller toolset. An
+      # unknown name raises inside the resolver — a deploy typo crashes loudly rather
+      # than granting tools.
       def persona_key_for
-        ENV.fetch('TUTOR_PERSONA', 'tier3')
+        ENV.fetch('TUTOR_PERSONA', 'tutor-socratic')
       end
 
       def resolve_persona

@@ -39,8 +39,8 @@ describe Tyla::Values::HistoryTurnSerializer do
     _(result[1][:content]).must_include 'data.R'
   end
 
-  # S2 — seen_paths placeholder uses correct wording (no tool-reserved words)
-  it 'S2: ### a.R in context_headers → placeholder with "Previously inspected / call load_file"' do
+  # S2 — seen_paths placeholder uses correct wording: conditional load_file (not unconditional)
+  it 'S2: ### a.R in context_headers → placeholder with conditional "call load_file only if not in live section"' do
     turn = base_turn('context_headers' => "### a.R\n")
     result = HTS.call(turn)
     user = result[0][:content]
@@ -48,8 +48,8 @@ describe Tyla::Values::HistoryTurnSerializer do
     _(user).must_include 'Previously inspected'
     _(user).must_include 'call load_file'
     _(user).must_include 'a.R'
+    _(user).must_include 'Student Workspace (live)'   # conditional reference to live section
     _(user).wont_include 'Loaded'
-    _(user).wont_include 'live'
     _(user).wont_include 'shown'
   end
 

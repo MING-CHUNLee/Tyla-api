@@ -97,7 +97,7 @@ Tyla::Database::PromptLogOrm.dataset = DB[:prompt_logs]
 # signal on and another off — see built_in_scenarios). Clean first turn (empty
 # history) also sidesteps the §7.3 history-channel leak.
 WORKSPACE_OVERVIEW = "R Markdown (.Rmd): #{Tyla::Infrastructure::Filesystem::StudentFileLoader::FILENAME}"
-TIERS = %w[tier1 tier2 tier3].freeze
+TIERS = %w[tutor-solver tutor-feynman tutor-socratic].freeze
 
 # §六 acceptance wants the MAIN hard signal (edit/execute only in tier1) to be
 # "多次重跑下穩定重現", and D6 / tier3 prose hallucination are explicit *rates*
